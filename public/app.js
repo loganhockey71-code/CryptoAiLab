@@ -75,6 +75,8 @@ const chgCell = (r) => { const f = (x) => (x == null ? '—' : `<span class="${c
 // "Rising" toggles: show only coins going up on every selected timeframe (1m candle green, 1h change > 0, 24h change > 0).
 const upOn = new Set();
 try { for (const k of JSON.parse(localStorage.getItem('upOn') || '[]')) upOn.add(k); } catch { /* storage unavailable: toggles still work this session */ }
+// The most recently switched-on toggle also decides the ORDER: best performer on that timeframe first.
+const perf = { m1: (r) => (r.candle ? (r.candle.c - r.candle.o) / r.candle.o : -Infinity), h1: (r) => r.chg1h ?? -Infinity, h24: (r) => r.chg24h ?? -Infinity };
 const isUp = { m1: (r) => !!r.candle && r.candle.c > r.candle.o, h1: (r) => r.chg1h != null && r.chg1h > 0, h24: (r) => r.chg24h != null && r.chg24h > 0 };
 
 function renderTable(s) {
@@ -82,7 +84,10 @@ function renderTable(s) {
   const gate = s.btc.bullish;
   const tbody = $('#coins tbody');
   const rows = s.rows.filter((r) => (!q || r.symbol.toLowerCase().includes(q) || r.name.toLowerCase().includes(q)) && [...upOn].every((k) => isUp[k](r)));
-  $('#universe-note').textContent = upOn.size ? `${rows.length} of ${s.rows.length} rising on ${[...upOn].map((k) => ({ m1: '1m', h1: '1h', h24: '24h' })[k]).join(' + ')}` : `${s.rows.length} tradable coins by market cap`;
+  const sortKey = [...upOn].pop();
+  if (sortKey) rows.sort((a, b) => perf[sortKey](b) - perf[sortKey](a));
+  const tfName = { m1: '1m', h1: '1h', h24: '24h' };
+  $('#universe-note').textContent = upOn.size ? `${rows.length} of ${s.rows.length} rising on ${[...upOn].map((k) => tfName[k]).join(' + ')} · best ${tfName[sortKey]} first` : `${s.rows.length} tradable coins by market cap`;
   document.querySelectorAll('#up-toggles .tog').forEach((b) => b.classList.toggle('on', upOn.has(b.dataset.tf)));
   tbody.innerHTML = rows.map((r) => {
     const c = r.candle;
