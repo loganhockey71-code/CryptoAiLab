@@ -112,9 +112,9 @@ export async function legislation() {
   if (billsCache && Date.now() - billsCache.at < 6 * 3600_000) return billsCache.value;
   let value;
   try {
-    const j = await getJson(`https://api.congress.gov/v3/bill?api_key=${congress}&format=json&limit=100&sort=updateDate+desc`);
-    const re = /crypto|digital asset|blockchain|stablecoin|bitcoin|virtual currency/i;
-    const hits = (j.bills || []).filter((b) => re.test(b.title)).slice(0, 5)
+    const j = await getJson(`https://api.congress.gov/v3/bill?api_key=${congress}&format=json&limit=250&sort=updateDate+desc`);
+    const re = /crypto|digital asset|blockchain|stablecoin|bitcoin|virtual currency|CBDC|central bank digital|tariff|sanction|securities|commodit|derivative|financial technology|fintech|money laundering|bank secrecy|capital gains|federal reserve|debt ceiling|appropriations/i;
+    const hits = (j.bills || []).filter((b) => re.test(b.title)).slice(0, 8)
       .map((b) => ({ title: b.title, latestAction: b.latestAction?.text, actionDate: b.latestAction?.actionDate, number: `${b.type} ${b.number}` }));
     value = wrap(3, 'congress.gov', hits);
   } catch (e) { value = fail(3, 'congress.gov', e.message); }
@@ -189,4 +189,80 @@ export function coinSentiment(newsResult, coin) {
   const hits = newsResult.data.filter((n) => name.test(n.title) || (coin.symbol.length >= 3 && sym.test(n.title)));
   if (!hits.length) return null;
   return { score: hits.reduce((a, h) => a + h.sentiment, 0) / hits.length, count: hits.length, headlines: hits.slice(0, 3).map((h) => h.title) };
+}
+
+/* ---------- Tier 3/4: political, regulatory, central-bank and general news feeds ---------- */
+const safeUrl = (u) => (u && /^https?:\/\//i.test(u.trim()) ? decode(u.trim()) : null);
+const strip = (s) => decode(String(s ?? '')).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+
+/** Parse RSS (<item>) and Atom (<entry>) into { title, desc, link, publishedAt }. */
+export function parseFeed(xml) {
+  const out = [];
+  for (const m of xml.matchAll(/<(item|entry)\b[^>]*>([\s\S]*?)<\/\1>/g)) {
+    const b = m[2];
+    const pick = (tag) => new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`, 'i').exec(b)?.[1];
+    const date = strip(pick('pubDate') ?? pick('published') ?? pick('updated') ?? pick('dc:date'));
+    const link = /<link\b[^>]*>\s*([^<\s][^<]*)<\/link>/i.exec(b)?.[1] ?? /<link\b[^>]*href="([^"]+)"/i.exec(b)?.[1];
+    out.push({ title: strip(pick('title')), desc: strip(pick('description') ?? pick('summary') ?? pick('content')), link: safeUrl(strip(link)), publishedAt: date ? Date.parse(date) || null : null });
+  }
+  return out;
+}
+
+const HOUR = 3600_000;
+// tier 3 = official government / central-bank source, tier 4 = news organisation or unofficial mirror
+const POLITICAL_FEEDS = [
+  { name: 'White House: presidential actions', url: 'https://www.whitehouse.gov/presidential-actions/feed/', tier: 3, kind: 'executive', maxAgeH: 168, take: 6 },
+  { name: 'Federal Reserve: press releases', url: 'https://www.federalreserve.gov/feeds/press_all.xml', tier: 3, kind: 'central_bank', maxAgeH: 72, take: 5 },
+  { name: 'Federal Reserve: speeches', url: 'https://www.federalreserve.gov/feeds/speeches.xml', tier: 3, kind: 'central_bank', maxAgeH: 96, take: 4 },
+  { name: 'SEC: press releases', url: 'https://www.sec.gov/news/pressreleases.rss', tier: 3, kind: 'regulator', maxAgeH: 96, take: 5 },
+  { name: 'CFTC: press releases', url: 'https://www.cftc.gov/RSS/RSSGP/rssgp.xml', tier: 3, kind: 'regulator', maxAgeH: 96, take: 4 },
+  { name: 'BBC News: world', url: 'https://feeds.bbci.co.uk/news/world/rss.xml', tier: 4, kind: 'world', maxAgeH: 24, take: 6 },
+  { name: 'NPR: politics', url: 'https://feeds.npr.org/1014/rss.xml', tier: 4, kind: 'politics', maxAgeH: 24, take: 6 },
+  { name: 'CNBC: markets', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664', tier: 4, kind: 'markets', maxAgeH: 24, take: 6 },
+  { name: 'Google News: tariffs, sanctions, Fed, executive orders, war', url: 'https://news.google.com/rss/search?q=when:1d+(tariffs+OR+sanctions+OR+%22Federal+Reserve%22+OR+%22executive+order%22+OR+war+OR+election)&hl=en-US&gl=US&ceid=US:en', tier: 4, kind: 'politics', maxAgeH: 24, take: 10 },
+  { name: 'Truth Social posts (unofficial mirror)', url: 'https://www.trumpstruth.org/feed', tier: 4, kind: 'social', maxAgeH: 24, take: 8, social: true },
+];
+
+async function readFeed(f) {
+  const res = await fetch(f.url, { headers: { 'User-Agent': 'Mozilla/5.0 crypto-ai-lab', accept: 'application/rss+xml, application/xml, text/xml, */*' }, redirect: 'follow', signal: AbortSignal.timeout(15_000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const now = Date.now();
+  const items = [];
+  for (const it of parseFeed(await res.text())) {
+    let title = it.title;
+    if (f.social && /^\[No Title\]/i.test(title)) title = it.desc.slice(0, 280);      // the mirror puts the post text in the description
+    if (!title) continue;                                                                    // image-only / empty posts
+    if (it.publishedAt && now - it.publishedAt > f.maxAgeH * HOUR) continue;
+    items.push({ source: f.name, tier: f.tier, kind: f.kind, title: title.slice(0, 300), url: it.link, publishedAt: it.publishedAt });
+    if (items.length >= f.take) break;
+  }
+  return items;
+}
+
+async function federalRegisterOrders() {
+  const res = await fetch('https://www.federalregister.gov/api/v1/documents.json?conditions[presidential_document_type][]=executive_order&order=newest&per_page=5', { signal: AbortSignal.timeout(15_000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const j = await res.json();
+  const cutoff = Date.now() - 14 * 24 * HOUR;
+  return (j.results ?? []).map((r) => ({
+    source: 'Federal Register: executive orders', tier: 3, kind: 'executive', title: `Executive Order ${r.executive_order_number ?? ''}: ${r.title}`.replace('Order :', 'Order:'),
+    url: safeUrl(r.html_url), publishedAt: Date.parse(r.signing_date || r.publication_date) || null,
+  })).filter((i) => !i.publishedAt || i.publishedAt > cutoff);
+}
+
+let politicsCache = null;
+export async function politics() {
+  if (politicsCache && Date.now() - politicsCache.at < 10 * 60_000) return politicsCache.value;
+  const items = [], feeds = [];
+  const jobs = [...POLITICAL_FEEDS.map((f) => ({ name: f.name, tier: f.tier, run: () => readFeed(f) })), { name: 'Federal Register: executive orders', tier: 3, run: federalRegisterOrders }];
+  await Promise.all(jobs.map(async (j) => {
+    try { const got = await j.run(); items.push(...got); feeds.push({ name: j.name, tier: j.tier, ok: true, count: got.length, error: null }); }
+    catch (e) { feeds.push({ name: j.name, tier: j.tier, ok: false, count: 0, error: e.message }); }
+  }));
+  items.sort((a, b) => (b.publishedAt ?? 0) - (a.publishedAt ?? 0));
+  const failed = feeds.filter((f) => !f.ok);
+  if (failed.length) warn('political feeds unavailable:', failed.map((f) => `${f.name} (${f.error})`).join('; '));
+  const value = items.length ? wrap(3, 'political-feeds', items, { feeds }) : { ...fail(3, 'political-feeds', 'no feed returned items'), feeds };
+  politicsCache = { at: Date.now(), value };
+  return value;
 }

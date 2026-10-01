@@ -25,6 +25,8 @@ export const state = {
   decisions: [],               // newest first (decision log panel)
   reflections: [],             // newest first (AI learning feed)
   closedToday: [],             // closed trades since UTC midnight
+  recentClosed: [],            // newest first, feeds the Trade History panel
+  newsFeed: { at: null, feeds: [], items: [] },   // everything the app read this scan (News & Politics panel)
   copyCooldown: new Map(),     // coin -> until (2h lockout after a copied position hits its stop)
   scan: { running: false, startedAt: null, finishedAt: null, count: 0, lastError: null, progress: '' },
   sources: {},                 // name -> { tier, ok, fetchedAt, error }
@@ -47,6 +49,7 @@ const coinState = (symbol) => {
 
 function noteSource(r) {
   if (!r) return;
+  if (r.feeds) for (const f of r.feeds) state.sources[f.name] = { tier: f.tier, ok: f.ok, fetchedAt: r.fetchedAt, error: f.error };
   if (r.fallbackFrom) state.sources[r.fallbackFrom.source] = { tier: r.tier, ok: false, fetchedAt: r.fetchedAt, error: `${r.fallbackFrom.error}: using ${r.source} instead` };
   state.sources[r.source] = { tier: r.tier, ok: r.ok, fetchedAt: r.fetchedAt, error: r.error ?? null };
 }
@@ -142,6 +145,8 @@ function recordSkipped(cs, reason, extra = {}) {
   });
 }
 
+const compactPolitics = (p) => (p?.ok ? p.data.slice(0, 40).map((i) => ({ source: i.source, tier: i.tier, kind: i.kind, ageHours: i.publishedAt ? +((Date.now() - i.publishedAt) / 3600_000).toFixed(1) : null, title: i.title.slice(0, 200) })) : []);
+
 async function runScan() {
   const s = state.scan;
   s.running = true; s.startedAt = Date.now(); s.lastError = null; s.progress = 'refreshing universe';
@@ -174,12 +179,22 @@ async function runScan() {
     for (const sym of [...state.coins.keys()]) if (![...universe.coins.values()].some((c) => c.symbol === sym)) state.coins.delete(sym);
 
     s.progress = 'collecting context';
-    const [news, macro, bills, onchain] = await Promise.all([src.news(), src.macro(), src.legislation(), src.onchain()]);
-    [news, macro, bills, onchain].forEach(noteSource);
+    const [news, macro, bills, onchain, politics] = await Promise.all([src.news(), src.macro(), src.legislation(), src.onchain(), src.politics()]);
+    [news, macro, bills, onchain, politics].forEach(noteSource);
+    state.newsFeed = {
+      at: Date.now(),
+      feeds: [...(politics.feeds ?? []), { name: 'Crypto news RSS (CoinDesk, Cointelegraph)', tier: 4, ok: news.ok, count: news.ok ? news.data.length : 0, error: news.error ?? null },
+        { name: 'Congress.gov: market-relevant bills', tier: 3, ok: bills.ok, count: bills.ok ? bills.data.length : 0, error: bills.error ?? null }],
+      items: [
+        ...(politics.ok ? politics.data : []),
+        ...(news.ok ? news.data.map((n) => ({ source: n.source, tier: 4, kind: 'crypto', title: n.title, url: null, publishedAt: n.publishedAt })) : []),
+        ...(bills.ok ? bills.data.map((b) => ({ source: 'Congress.gov', tier: 3, kind: 'legislation', title: `${b.number}: ${b.title}${b.latestAction ? ` — ${b.latestAction}` : ''}`, url: null, publishedAt: Date.parse(b.actionDate) || null })) : []),
+      ].filter((i) => i.publishedAt).sort((a, b) => b.publishedAt - a.publishedAt).slice(0, 100),
+    };
     for (const cs of state.coins.values()) cs.sentiment = cs.coin ? src.coinSentiment(news, cs.coin) : null;
 
     s.progress = 'evaluating setups';
-    await evaluateCandidates({ news, macro, bills, onchain });
+    await evaluateCandidates({ news, macro, bills, onchain, politics });
     s.count++;
   } catch (e) {
     s.lastError = e.message;
@@ -237,13 +252,14 @@ async function evaluateCandidates(ctxSources) {
       derivatives: { source: deriv.source, tier: 2, at: deriv.fetchedAt },
       macro: { source: 'fred', tier: 3, ok: ctxSources.macro.ok, at: ctxSources.macro.fetchedAt },
       legislation: { source: 'congress.gov', tier: 3, ok: ctxSources.bills.ok, at: ctxSources.bills.fetchedAt },
+      politics: { source: 'white house, federal register, fed, sec, cftc, bbc, npr, cnbc, google news, truth social mirror', tier: '3/4', ok: ctxSources.politics.ok, at: ctxSources.politics.fetchedAt },
       onchain: { source: 'etherscan', tier: 4, ok: ctxSources.onchain.ok, at: ctxSources.onchain.fetchedAt },
       news: { source: 'coindesk+cointelegraph rss', tier: 4, ok: ctxSources.news.ok, at: ctxSources.news.fetchedAt },
     };
     const tfSummary = Object.fromEntries(Object.entries(cs.snaps).map(([k, v]) => [k, v && { trendUp: v.trendUp, rsi: v.rsi && +v.rsi.toFixed(1), macdHist: v.macdHist, ema20: v.ema20, ema50: v.ema50 }]));
     const sig = await generateSignal({
       symbol: cs.symbol, name: cs.coin.name, price: fp.price, btcRegime: state.btc.regime, timeframes: tfSummary, rvol: cs.rvol,
-      derivatives: deriv.data, macro: ctxSources.macro.data, legislation: ctxSources.bills.data, onchain: ctxSources.onchain.data,
+      derivatives: deriv.data, macro: ctxSources.macro.data, legislation: ctxSources.bills.data, onchain: ctxSources.onchain.data, politics: compactPolitics(ctxSources.politics),
       news: cs.sentiment ? { coin: cs.sentiment, market: (ctxSources.news.data || []).slice(0, 8) } : { market: (ctxSources.news.data || []).slice(0, 8) },
       provenance,
     }, lessons.map((l) => ({ outcome: l.outcome, symbol: l.symbol, lesson: l.lesson })));
@@ -392,6 +408,41 @@ function onMomentumCheck(product) {
   }
 }
 
+/* ---------------------------------------------------------------- trade history */
+
+const sourceOf = (pos) => (pos.copy ? (pos.venue === 'onchain' ? 'copy_zerion' : 'copy_hyperliquid') : 'strategy');
+
+function historyFromDb(t) {
+  return {
+    id: t.id, symbol: t.symbol, side: t.side ?? 'long', source: t.source ?? 'strategy', trader: t.source_trader ?? null,
+    entry: Number(t.entry_price), exit: Number(t.exit_price), notional: Number(t.final_pnl_pct) ? Math.abs(Number(t.final_pnl) / Number(t.final_pnl_pct)) : Number(t.notional), pnl: Number(t.final_pnl), pnlPct: Number(t.final_pnl_pct),
+    reason: t.exit_reason, openedAt: new Date(t.entry_time).getTime(), closedAt: new Date(t.exit_time).getTime(),
+  };
+}
+
+function recordHistory(pos, trade, notional) {
+  state.recentClosed.unshift({
+    id: pos.id, symbol: pos.symbol, side: pos.side ?? 'long', source: sourceOf(pos), trader: pos.copy?.trader ?? null,
+    entry: pos.entry, exit: trade.exit_price, notional, pnl: trade.final_pnl, pnlPct: trade.final_pnl_pct, reason: trade.exit_reason,
+    openedAt: pos.openedAt, closedAt: Date.now(),
+  });
+  if (state.recentClosed.length > 200) state.recentClosed.length = 200;
+}
+
+function historySummary() {
+  const all = state.recentClosed;
+  const wins = all.filter((t) => t.pnl > 0), losses = all.filter((t) => t.pnl <= 0);
+  const sum = (a) => a.reduce((x, t) => x + t.pnl, 0);
+  return {
+    trades: all.slice(0, 60).map((t) => ({ ...t, result: t.pnl > 0 ? 'win' : 'loss' })),
+    stats: {
+      count: all.length, wins: wins.length, losses: losses.length, winRate: all.length ? wins.length / all.length : null, net: sum(all),
+      avgWin: wins.length ? sum(wins) / wins.length : null, avgLoss: losses.length ? sum(losses) / losses.length : null,
+      best: all.length ? Math.max(...all.map((t) => t.pnl)) : null, worst: all.length ? Math.min(...all.map((t) => t.pnl)) : null,
+    },
+  };
+}
+
 // Fill price for leaving a position (long sells lower, short buys back higher) and for entering one.
 const exitFillFor = (side, px) => (side === 'short' ? px * (1 + R.slippagePct) : riskLib.exitFill(px));
 const entryFillFor = (side, px) => (side === 'short' ? px * (1 - R.slippagePct) : riskLib.entryFill(px));
@@ -417,6 +468,7 @@ export async function closePosition(pos, price, reason) {
     final_pnl_pct: finalPct, exit_time: new Date().toISOString(), entry_time: new Date(pos.openedAt).toISOString(), high_water: pos.highWater,
   };
   state.closedToday.push({ ...trade, exitAt: Date.now() });
+  recordHistory(pos, trade, pos.initCost ?? (pos.notional + pos.fee));
   await db.updateTrade(pos.id, {
     status: 'closed', exit_time: trade.exit_time, exit_price: exitPx, exit_reason: reason, fee_exit: feeExit, realized_partial: pos.realized ?? 0,
     gross_pnl: gross, final_pnl: finalPnl, final_pnl_pct: finalPct, actual_result: actual, high_water: pos.highWater, trailing_stop: pos.trailing,
@@ -650,9 +702,10 @@ export async function start() {
   for (const k of ['cash', 'equity', 'realized_pnl', 'starting_capital', 'daily_start_equity']) state.portfolio[k] = Number(state.portfolio[k]);
   if (!saved) await db.savePortfolio(state.portfolio);
 
-  const [reflections, signals, open, today] = await Promise.all([
-    db.recentReflections(100), db.recentSignals(80), db.openTrades(), db.closedTradesSince(utcDay() + 'T00:00:00Z'),
+  const [reflections, signals, open, today, recent] = await Promise.all([
+    db.recentReflections(100), db.recentSignals(80), db.openTrades(), db.closedTradesSince(utcDay() + 'T00:00:00Z'), db.recentTrades(300),
   ]);
+  state.recentClosed = (recent ?? []).filter((t) => t.status === 'closed' && t.exit_time).map(historyFromDb).sort((a, b) => b.closedAt - a.closedAt).slice(0, 200);
   state.reflections = reflections ?? [];
   for (const s of (signals ?? []).slice().reverse()) {
     if (s.status === 'skipped' || s.status === 'confirmation_failed') state.decisions.unshift({ at: new Date(s.created_at).getTime(), type: 'skipped', symbol: s.symbol, message: s.skip_reason ?? s.status });
@@ -729,6 +782,8 @@ export function snapshotForUi() {
     now, paper: true,
     portfolio: { ...p, equity, dailyPnlPct: equity / p.daily_start_equity - 1, gate: riskLib.tradingGate(p) },
     btc: state.btc, scan: state.scan, health: dataHealth(), rows, positions,
+    history: historySummary(),
+    newsFeed: state.newsFeed,
     decisions: state.decisions.slice(0, 100), reflections: state.reflections.slice(0, 40),
     pending: [...state.pending.values()].map((x) => ({ symbol: x.symbol, refPrice: x.refPrice, createdAt: x.createdAt, score: x.conf.total })),
     limits: { minConfluence: R.minConfluence, minRR: R.minRR, maxPositions: R.maxOpenPositions },

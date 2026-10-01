@@ -87,7 +87,8 @@ Multi-timeframe technicals (each timeframe: trendUp = EMA20>EMA50 and price>EMA5
 Relative volume (RVOL, last completed 15m vs 20-candle avg): ${ctx.rvol}
 Derivatives (Tier 2, Coinglass): ${JSON.stringify(ctx.derivatives)}
 Macro (Tier 3, FRED): ${JSON.stringify(ctx.macro)}
-Crypto legislation (Tier 3, Congress.gov): ${JSON.stringify(ctx.legislation)}
+Crypto/market legislation (Tier 3, Congress.gov): ${JSON.stringify(ctx.legislation)}
+Political, regulatory and central-bank events (Tier 3 = official White House / Federal Register / Federal Reserve / SEC / CFTC; Tier 4 = news outlets and an UNOFFICIAL Truth Social mirror; newest first): ${JSON.stringify(ctx.politics)}
 On-chain (Tier 4, Etherscan): ${JSON.stringify(ctx.onchain)}
 Recent headlines (Tier 4, with per-headline sentiment -1..1): ${JSON.stringify(ctx.news)}
 Data provenance/timestamps: ${JSON.stringify(ctx.provenance)}
@@ -95,6 +96,7 @@ Data provenance/timestamps: ${JSON.stringify(ctx.provenance)}
 Rules:
 - Several aggregators repeating the same underlying fact count as ONE independent source.
 - If reliable sources materially disagree, lower confidence or return direction "neutral".
+- Political items are market-wide context, not coin-specific evidence. Prefer Tier 3 over Tier 4; treat social-media posts and headlines as unverified. Count them under "macro_gov". If a high-impact event from the last 24 hours (rate decision, tariffs, sanctions, an executive order or SEC/CFTC action touching crypto or markets) makes the setup riskier, lower confidence and say so in key_risks. Never invent a causal link between an event and this coin.
 - target_price and stop_price must be consistent with direction "bullish": stop_price < price < target_price. Stop distance should be between 2.5% and 4% below price.
 - "supporting_sources" and "conflicting_sources" must only contain values from: "exchange_technicals", "derivatives", "macro_gov", "news_onchain".
 

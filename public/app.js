@@ -127,12 +127,46 @@ function renderReflections(s) {
     : '<div class="empty">No completed trades yet. A post-mortem is written after every trade, win or lose.</div>';
 }
 
+const reasonLabel = { stop_loss: 'hit stop-loss', trailing_stop: 'trailing stop', momentum_reversal: 'momentum reversed', leader_exit: 'trader exited', leader_flip: 'trader flipped', leader_exit_while_offline: 'trader exited (offline)', circuit_breaker_daily_loss: 'daily loss cap' };
+const sourceLabel = (t) => (t.source === 'copy_hyperliquid' ? `copy · Hyperliquid ${t.trader ? t.trader.slice(0, 6) : ''}` : t.source === 'copy_zerion' ? `copy · on-chain ${t.trader ? t.trader.slice(0, 6) : ''}` : 'LLM strategy');
+const held = (a, b) => { const m = Math.max(0, (b - a) / 60000); return m < 90 ? `${m.toFixed(0)}m` : m < 2880 ? `${(m / 60).toFixed(1)}h` : `${(m / 1440).toFixed(1)}d`; };
+
+function renderHistory(h) {
+  if (!h) return;
+  const s = h.stats;
+  const chip = (label, val, c = '') => `<div class="chip"><b class="${c}">${val}</b><span>${label}</span></div>`;
+  $('#history-stats').innerHTML = s.count
+    ? [chip('Trades', s.count), chip('Won', s.wins, 'up'), chip('Lost', s.losses, 'down'), chip('Win rate', (s.winRate * 100).toFixed(0) + '%', s.winRate >= 0.5 ? 'up' : 'down'), chip('Net P&L', money(s.net), cls(s.net)),
+       chip('Avg win', money(s.avgWin), 'up'), chip('Avg loss', money(s.avgLoss), 'down'), chip('Best', money(s.best), cls(s.best)), chip('Worst', money(s.worst), cls(s.worst))].join('')
+    : '';
+  $('#history').innerHTML = h.trades.length
+    ? `<table><thead><tr><th>Result</th><th>Closed</th><th>Coin</th><th>Side</th><th>Source</th><th class="r">Entry</th><th class="r">Exit</th><th class="r">Size</th><th class="r">Net P&amp;L</th><th class="r">Net %</th><th>Why it closed</th><th class="r">Held</th></tr></thead><tbody>${h.trades.map((t) => `<tr data-sym="${esc(t.symbol)}">
+        <td><span class="pill ${t.result}">${t.result === 'win' ? 'WIN' : 'LOSS'}</span></td><td class="muted" title="${esc(new Date(t.closedAt).toLocaleString())}">${ago(t.closedAt)}</td>
+        <td><b>${esc(t.symbol)}</b></td><td><span class="pill ${t.side === 'short' ? 'bad' : 'good'}">${esc(t.side)}</span></td><td class="muted" title="${esc(t.trader || '')}">${esc(sourceLabel(t))}</td>
+        <td class="r">${price(t.entry)}</td><td class="r">${price(t.exit)}</td><td class="r">${money(t.notional)}</td>
+        <td class="r ${cls(t.pnl)}"><b>${t.pnl >= 0 ? '+' : ''}${money(t.pnl)}</b></td><td class="r ${cls(t.pnl)}">${pct(t.pnlPct)}</td>
+        <td class="muted">${esc(reasonLabel[t.reason] || t.reason)}</td><td class="r muted">${held(t.openedAt, t.closedAt)}</td></tr>`).join('')}</tbody></table>`
+    : '<div class="empty">No closed trades yet. Every trade the app closes will appear here with a WIN or LOSS, net of fees and slippage.</div>';
+}
+
+const kindLabel = { executive: 'White House / executive', central_bank: 'Federal Reserve', regulator: 'SEC / CFTC', politics: 'politics', world: 'world', markets: 'markets', social: 'Truth Social (unofficial)', crypto: 'crypto news', legislation: 'Congress' };
+function renderNews(n) {
+  if (!n) return;
+  const bad = n.feeds.filter((f) => !f.ok).length;
+  $('#news-status').textContent = n.at ? `${n.items.length} items · ${n.feeds.length - bad}/${n.feeds.length} feeds up · updated ${ago(n.at)}` : 'waiting for first scan…';
+  $('#news-feeds').innerHTML = n.feeds.map((f) => `<span class="feedtag ${f.ok ? 'ok' : 'bad'}" title="${esc(f.error || (f.count + ' items'))}">${f.ok ? '●' : '○'} ${esc(f.name)} · T${f.tier}${f.ok ? ' · ' + f.count : ''}</span>`).join('');
+  $('#news').innerHTML = n.items.length ? n.items.map((i) => `<div class="item"><div class="meta"><span>${ago(i.publishedAt)}</span><span class="pill ${i.tier === 3 ? 'good' : ''}">${esc(kindLabel[i.kind] || i.kind)}</span><span>${esc(i.source)}</span><span class="muted">tier ${i.tier}</span></div>
+      <div>${i.url ? `<a href="${esc(i.url)}" target="_blank" rel="noopener noreferrer">${esc(i.title)}</a>` : esc(i.title)}</div></div>`).join('')
+    : '<div class="empty">Nothing yet. Feeds are read on every scan (about every 5 minutes) and cached for 10.</div>';
+}
+
 function renderCopy(c) {
   if (!c) return;
   const k = c.counts, hlS = c.sources.hyperliquid, zr = c.sources.zerion;
-  const phase = (d) => (d.phase === 'evaluating traders' || d.phase === 'evaluating wallets' ? `scoring ${d.evaluated}/${d.total}` : d.phase !== 'idle' ? d.phase : 'idle');
+  const phase = (d) => (d.phase === 'evaluating traders' || d.phase === 'evaluating wallets' ? `scoring ${d.evaluated}/${d.total}${d.scorable != null ? ` (${d.scorable} with enough trades)` : ''}` : d.phase !== 'idle' ? d.phase : 'idle');
   $('#copy-status').textContent = `${k.qualified} qualified (${k.preferred} at ≥80%) of ${k.evaluated} scored · tracking ${k.tracking} · ` +
-    `Hyperliquid: ${hlS.connected ? 'live' : 'offline'}, ${phase(hlS.discovery)} · Zerion: ${zr.enabled ? phase(zr.discovery) : 'OFF (no API key)'}`;
+    `Hyperliquid: ${hlS.connected ? 'live' : 'offline'}, ${phase(hlS.discovery)} · Zerion: ${zr.enabled ? phase(zr.discovery) : 'OFF (no API key)'}` +
+    (zr.birdeye ? ` · Birdeye: ${zr.birdeye.status}${zr.birdeye.lastAt ? ` (${zr.birdeye.lastFound} wallets, ${zr.birdeye.callsToday}/${zr.birdeye.cap} calls today)` : ''}` : '');
   const short = (a) => a.slice(0, 6) + '…' + a.slice(-4);
   const badge = (t) => t.tracking ? `<span class="pill good">tracking${t.tier === 'preferred' ? ' · ≥80%' : ' · ≥75%'}</span>` : t.status === 'qualified' ? '<span class="pill amber">qualified (bench)</span>' : '<span class="pill bad">rejected</span>';
   const src = (t) => t.source === 'zerion' ? `<span class="pill" title="${esc((t.chains || []).join(', '))}">on-chain</span>` : '<span class="pill">Hyperliquid</span>';
@@ -154,7 +188,7 @@ function renderCopy(c) {
 
 function render(s) {
   latest = s;
-  renderStats(s); renderTable(s); renderPositions(s); renderCopy(s.copy); renderDecisions(s); renderReflections(s);
+  renderStats(s); renderTable(s); renderPositions(s); renderHistory(s.history); renderNews(s.newsFeed); renderCopy(s.copy); renderDecisions(s); renderReflections(s);
 }
 
 $('#positions').addEventListener('click', (e) => {

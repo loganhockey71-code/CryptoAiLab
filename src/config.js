@@ -33,6 +33,7 @@ export const config = {
     congress: env('CONGRESS_KEY'),
     fred: env('FRED_API_KEY'),
     zerion: env('ZERION_API_KEY'),
+    birdeye: env('BIRDEYE_API_KEY'),
     watchWallets: (env('ZERION_WATCH_WALLETS') || '').split(',').map((a) => a.trim()).filter(Boolean),
   },
   models: {
@@ -74,7 +75,11 @@ export const config = {
   // On-chain (Zerion) copy trading. Same win-rate rules as Hyperliquid (see config.copy); these are the on-chain specifics.
   zerion: Object.freeze({
     networks: ['eth', 'base', 'arbitrum', 'bsc', 'solana'],     // GeckoTerminal network ids used to discover active wallets
-    poolsPerNetwork: 8, minDiscoveryTradeUsd: 1000, candidatePool: 120, maxPages: 8, minTradeUsd: 50,
+    poolsPerNetwork: 15, minDiscoveryTradeUsd: 500, maxDiscoveryTradeUsd: 100_000, botSamplePerPool: 5,   // wallets with more swaps than this in ONE pool sample look like bots
+    poolLiquidityMin: 200_000, poolLiquidityMax: 100_000_000, poolVolume24hMin: 200_000,                  // skip dust pools and the bot-dominated majors
+    candidatePool: 400, maxPages: 8, minTradeUsd: 50,
+    // Birdeye (Solana top traders by token) is rate/CU limited on the free plan: run rarely and cap calls per day.
+    birdeyeTokens: 5, birdeyeEveryH: 6, birdeyePerDayCap: 25, birdeyeMinRealizedUsd: 250, birdeyeMinTrades: 3,
     pollMs: 20_000, maxFillAgeMs: 300_000, pricePollMs: 5_000,
     minLiquidityUsd: 200_000, minVolume24hUsd: 100_000, minPairAgeDays: 3,   // only copy into tokens we could realistically exit
   }),

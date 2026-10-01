@@ -46,3 +46,8 @@ Save this content as `CLAUDE.md` in the root folder of your project (alongside `
 - Same qualification as Hyperliquid (win rate >= 75% hard floor, >= 80% preferred, plus trade count, history, profit factor, bot and underwater checks).
 - Copy only into tokens we could exit: liquidity >= $200k, 24h volume >= $100k, pair age >= 3 days. Long-only (spot). Skip entries detected more than 300s late or more than 1% worse than the leader's price; exits are never skipped for age.
 - Same position cap (max 3 across ALL sources), 30% size cap, circuit breakers, 4% hard stop, fees + slippage and post-mortems as every other trade.
+
+## News, Politics & Regulation (read every scan, shown in the News & Politics panel)
+- Tier 3 (official): White House presidential actions, Federal Register executive orders, Federal Reserve press releases + speeches, SEC and CFTC press releases, Congress.gov bills (crypto, tariffs, sanctions, securities, banking vocabulary), FRED macro series.
+- Tier 4 (news / unofficial): CoinDesk, Cointelegraph, BBC World, NPR Politics, CNBC Markets, Google News (tariffs/sanctions/Fed/executive orders/war/election), and an UNOFFICIAL Truth Social mirror (trumpstruth.org). X/Twitter is not covered (no free API).
+- Political items are market-wide context for the LLM Research Brain only (counted under macro_gov). They never trigger a trade, and copy trading ignores them.

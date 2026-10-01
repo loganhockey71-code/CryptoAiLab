@@ -35,30 +35,78 @@ function gt(path) {
   return p;
 }
 
+// Solana base/quote mints: a "token" that is really SOL or a stablecoin has no useful top-trader list.
+const SOL_BASE_MINTS = new Set(['So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']);
+const birdeye = { at: 0, day: '', callsToday: 0, lastFound: 0, status: config.keys.birdeye ? 'on' : 'off (no BIRDEYE_API_KEY)' };
+
+/** Wallets with the most REALIZED profit on trending Solana tokens, minus Birdeye-tagged bots/snipers/devs. They still must pass the win-rate scoring. */
+async function birdeyeSmartWallets(tokens) {
+  const key = config.keys.birdeye;
+  if (!key || !tokens.length || Date.now() - birdeye.at < Z.birdeyeEveryH * 3600_000) return [];
+  const day = new Date().toISOString().slice(0, 10);
+  if (birdeye.day !== day) { birdeye.day = day; birdeye.callsToday = 0; }
+  const found = new Map();
+  for (const token of [...new Set(tokens)].slice(0, Z.birdeyeTokens)) {
+    if (birdeye.callsToday >= Z.birdeyePerDayCap) { birdeye.status = 'daily call cap reached'; break; }
+    birdeye.callsToday++;
+    try {
+      const res = await fetch(`https://public-api.birdeye.so/defi/v2/tokens/top_traders?address=${token}&time_frame=7d&sort_type=desc&sort_by=realized_pnl&offset=0&limit=10`,
+        { headers: { 'X-API-KEY': key, 'x-chain': 'solana', accept: 'application/json' }, signal: AbortSignal.timeout(20_000) });
+      if (res.status === 401 || res.status === 403) { birdeye.status = `key rejected (HTTP ${res.status}) or endpoint not on your plan`; warn('Birdeye:', birdeye.status); break; }
+      if (!res.ok) { warn('Birdeye top_traders', res.status); continue; }
+      for (const t of (await res.json()).data?.items ?? []) {
+        if ((t.tags ?? []).some((x) => /bundler|sniper|dev|bot|mev/i.test(x))) continue;
+        if (!(t.realizedPnl >= Z.birdeyeMinRealizedUsd) || !(t.trade >= Z.birdeyeMinTrades)) continue;
+        found.set(t.owner, (found.get(t.owner) ?? 0) + t.realizedPnl);
+      }
+    } catch (e) { warn('Birdeye', e.message); }
+    finally { await sleep(1300); }   // free plan: 1 request per second, even after a failed call
+  }
+  birdeye.at = Date.now(); birdeye.lastFound = found.size;
+  if (birdeye.status === 'on' || /cap/.test(birdeye.status)) birdeye.status = 'on';
+  log(`Birdeye: ${found.size} profitable non-bot Solana wallets from ${Math.min(tokens.length, Z.birdeyeTokens)} trending tokens (${birdeye.callsToday}/${Z.birdeyePerDayCap} calls today)`);
+  return [...found.entries()].sort((a, b) => b[1] - a[1]).map(([a]) => a);
+}
+
 const STABLE_PAIR = /\b(USDC|USDT|DAI|USDS|USDE)\b\s*\/\s*\b(USDC|USDT|DAI|USDS|USDE)\b/i;
 async function discoverCandidates() {
   const seen = new Map();   // address -> { pools:Set, vol, n }
+  const bots = new Set();
+  const solTokens = [];
   for (const net of Z.networks) {
     try {
       const tp = await gt(`/networks/${net}/trending_pools?page=1`);
-      const pools = (tp.data ?? []).filter((p) => !STABLE_PAIR.test(p.attributes.name)).slice(0, Z.poolsPerNetwork);
+      // Mid-liquidity pools with real volume: the largest majors are dominated by bots and routers.
+      const pools = (tp.data ?? []).filter((p) => {
+        const a = p.attributes, liq = Number(a.reserve_in_usd), vol = Number(a.volume_usd?.h24);
+        return !STABLE_PAIR.test(a.name) && liq >= Z.poolLiquidityMin && liq <= Z.poolLiquidityMax && vol >= Z.poolVolume24hMin;
+      }).slice(0, Z.poolsPerNetwork);
+      if (net === 'solana') for (const p of pools) { const mint = String(p.relationships?.base_token?.data?.id ?? '').replace(/^solana_/, ''); if (mint && !SOL_BASE_MINTS.has(mint)) solTokens.push(mint); }
       for (const p of pools) {
         try {
           const tr = await gt(`/networks/${net}/pools/${p.attributes.address}/trades?trade_volume_in_usd_greater_than=${Z.minDiscoveryTradeUsd}`);
+          const inPool = new Map();
           for (const t of tr.data ?? []) {
-            const a = t.attributes, addr = a.tx_from_address && norm(a.tx_from_address);
-            if (!addr) continue;
-            const c = seen.get(addr) ?? { pools: new Set(), vol: 0, n: 0 };
-            c.pools.add(p.id); c.vol += Number(a.volume_in_usd) || 0; c.n++;
-            seen.set(addr, c);
+            const a = t.attributes, addr = a.tx_from_address && norm(a.tx_from_address), usd = Number(a.volume_in_usd) || 0;
+            if (!addr || usd > Z.maxDiscoveryTradeUsd) continue;
+            const c = inPool.get(addr) ?? { n: 0, vol: 0 };
+            c.n++; c.vol += usd; inPool.set(addr, c);
+          }
+          for (const [addr, c] of inPool) {
+            if (c.n > Z.botSamplePerPool) { bots.add(addr); continue; }   // many swaps in one pool sample: a bot, not a discretionary trader
+            const g = seen.get(addr) ?? { pools: new Set(), vol: 0, n: 0 };
+            g.pools.add(p.id); g.vol += c.vol; g.n += c.n;
+            seen.set(addr, g);
           }
         } catch (e) { warn('pool trades', e.message); }
       }
     } catch (e) { warn('trending pools', net, e.message); }
   }
-  const found = [...seen.entries()].sort((a, b) => b[1].pools.size - a[1].pools.size || b[1].vol - a[1].vol).slice(0, Z.candidatePool).map(([a]) => a);
+  const found = [...seen.entries()].filter(([a]) => !bots.has(a)).sort((a, b) => b[1].pools.size - a[1].pools.size || b[1].vol - a[1].vol).slice(0, Z.candidatePool).map(([a]) => a);
+  log(`Zerion discovery: ${found.length} candidate wallets (${bots.size} bot-like addresses excluded)`);
   const watch = config.keys.watchWallets.map(norm);
-  return [...new Set([...watch, ...found])];
+  const smart = await birdeyeSmartWallets(solTokens);
+  return [...new Set([...watch, ...smart, ...found])];
 }
 
 /* -------------------------------------------------------------- evaluation */
@@ -129,10 +177,11 @@ async function cycle() {
     const staleMs = C.reevalHours * 3600_000;
     const stale = (a) => { const t = wallets.map.get(a); return !t?.evaluated_at || Date.now() - new Date(t.evaluated_at).getTime() > staleMs; };
     const queue = [...[...wallets.map.values()].filter((t) => t.tracking && stale(t.address)).map((t) => t.address), ...candidates.filter(stale)];
-    d.phase = 'evaluating wallets'; d.total = queue.length; d.evaluated = 0; d.startedAt = Date.now();
+    d.phase = 'evaluating wallets'; d.total = queue.length; d.evaluated = 0; d.scorable = 0; d.startedAt = Date.now();
     for (const address of queue) {
       try {
         const rec = await evaluate(address);
+        if (rec.trades >= C.minTrades) d.scorable = (d.scorable ?? 0) + 1;
         rec.tracking = wallets.map.get(address)?.tracking ?? false;
         wallets.map.set(address, rec);
         await db.upsertTraders([rec]);
@@ -328,10 +377,11 @@ export function snapshot() {
   });
   return {
     enabled: zerionEnabled, status: wallets.status, discovery: wallets.discovery,
+    birdeye: { status: birdeye.status, callsToday: birdeye.callsToday, cap: Z.birdeyePerDayCap, lastFound: birdeye.lastFound, lastAt: birdeye.at || null },
     counts: { evaluated: all.length, qualified: all.filter((t) => t.status === 'qualified').length, preferred: all.filter((t) => t.status === 'qualified' && t.tier === 'preferred').length, tracking: all.filter((t) => t.tracking).length },
     tracked: all.filter((t) => t.tracking).sort((a, b) => b.win_rate - a.win_rate).map(row),
     bench: all.filter((t) => t.status === 'qualified' && !t.tracking).sort((a, b) => b.win_rate - a.win_rate).map(row),
     near: all.filter((t) => t.status === 'rejected' && t.trades >= 10).sort((a, b) => b.win_rate - a.win_rate).slice(0, 12).map(row),
   };
 }
-export const __test = { handleTrade, wallets, discoverCandidates };
+export const __test = { handleTrade, wallets, discoverCandidates, birdeyeSmartWallets, birdeye };

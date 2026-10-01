@@ -209,7 +209,7 @@ export function snapshot() {
     traders: [...hlTracked, ...oc.tracked].sort(byWin).concat([...hlBench, ...oc.bench].sort(byWin), [...hlNear, ...oc.near].sort(byWin).slice(0, 14)),
     sources: {
       hyperliquid: { counts: hlCounts, discovery: traders.discovery, connected: hl.connected, midAgeMs: Number.isFinite(hl.midAgeMs()) ? hl.midAgeMs() : null },
-      zerion: { enabled: oc.enabled, status: oc.status, counts: oc.counts, discovery: oc.discovery },
+      zerion: { enabled: oc.enabled, status: oc.status, counts: oc.counts, discovery: oc.discovery, birdeye: oc.birdeye },
     },
     rules: { minWinRate: C.minWinRate, preferredWinRate: C.preferredWinRate, minTrades: C.minTrades, windowDays: C.windowDays, stopPct: C.stopPct, maxChasePct: C.maxChasePct },
   };
