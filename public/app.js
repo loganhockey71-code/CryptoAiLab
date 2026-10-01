@@ -72,13 +72,18 @@ function renderStats(s) {
 
 const chgCell = (r) => { const f = (x) => (x == null ? '—' : `<span class="${cls(x)}">${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%</span>`); return `${f(r.chg1h)} <span class="muted">/</span> ${f(r.chg24h)}`; };
 
+// "Rising" toggles: show only coins going up on every selected timeframe (1m candle green, 1h change > 0, 24h change > 0).
+const upOn = new Set();
+try { for (const k of JSON.parse(localStorage.getItem('upOn') || '[]')) upOn.add(k); } catch { /* storage unavailable: toggles still work this session */ }
+const isUp = { m1: (r) => !!r.candle && r.candle.c > r.candle.o, h1: (r) => r.chg1h != null && r.chg1h > 0, h24: (r) => r.chg24h != null && r.chg24h > 0 };
+
 function renderTable(s) {
   const q = $('#filter').value.trim().toLowerCase();
   const gate = s.btc.bullish;
   const tbody = $('#coins tbody');
-  const rows = s.rows.filter((r) => !q || r.symbol.toLowerCase().includes(q) || r.name.toLowerCase().includes(q));
-  const tradable = s.rows.filter((r) => r.tradable).length;
-  $('#universe-note').textContent = `${s.rows.length} tradable coins by market cap`;
+  const rows = s.rows.filter((r) => (!q || r.symbol.toLowerCase().includes(q) || r.name.toLowerCase().includes(q)) && [...upOn].every((k) => isUp[k](r)));
+  $('#universe-note').textContent = upOn.size ? `${rows.length} of ${s.rows.length} rising on ${[...upOn].map((k) => ({ m1: '1m', h1: '1h', h24: '24h' })[k]).join(' + ')}` : `${s.rows.length} tradable coins by market cap`;
+  document.querySelectorAll('#up-toggles .tog').forEach((b) => b.classList.toggle('on', upOn.has(b.dataset.tf)));
   tbody.innerHTML = rows.map((r) => {
     const c = r.candle;
     const candle = c ? `<span class="${c.c >= c.o ? 'up' : 'down'}">${c.c >= c.o ? '▲' : '▼'} ${pct((c.c - c.o) / c.o)}</span> <span class="muted">${price(c.l)}–${price(c.h)}</span>` : '<span class="muted">—</span>';
@@ -229,6 +234,14 @@ $('#coins tbody').addEventListener('click', (e) => {
   refreshChart();
 });
 $('#filter').addEventListener('input', () => latest && renderTable(latest));
+$('#up-toggles').addEventListener('click', (e) => {
+  const b = e.target.closest('.tog');
+  if (!b) return;
+  const k = b.dataset.tf;
+  upOn.has(k) ? upOn.delete(k) : upOn.add(k);
+  try { localStorage.setItem('upOn', JSON.stringify([...upOn])); } catch { /* ignore */ }
+  if (latest) renderTable(latest);
+});
 
 /* ------------------------------------------------------------- live stream */
 function connect() {

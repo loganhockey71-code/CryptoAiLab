@@ -32,6 +32,10 @@ body { min-height: 100vh; }
 .table-panel { grid-area: table; } .chart-panel { grid-area: chart; } .pos-panel { grid-area: pos; } .log-panel { grid-area: log; } .learn-panel { grid-area: learn; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; min-width: 0; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+.toggles { display: flex; gap: 6px; margin-left: auto; }
+.tog { background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+.tog:hover { color: var(--text, #e6e9ef); }
+.tog.on { color: #26a69a; border-color: #26a69a; background: rgba(38, 166, 154, .12); }
 .panel-head h2 { margin: 0; font-size: 13px; } .panel-head small { color: var(--muted); font-weight: 400; margin-left: 6px; }
 .scroll { overflow: auto; }
 .table-scroll { max-height: 720px; } #positions { max-height: 260px; } #decisions, #reflections { max-height: 340px; }
