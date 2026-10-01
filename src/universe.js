@@ -50,6 +50,12 @@ function nonTradableReason(c) {
 }
 
 const UNIVERSE_SIZE = 100;
+/** CoinGecko's trending list (top searched coins), as a set of CoinGecko ids. Best-effort: empty on failure. */
+export async function cgTrending() {
+  try { const j = await cgFetch('/search/trending'); return new Set((j.coins ?? []).map((c) => c.item?.id).filter(Boolean)); }
+  catch (e) { warn('CoinGecko trending unavailable:', e.message); return new Set(); }
+}
+
 export const universe = { coins: new Map(), updatedAt: 0, cmcAvailable: false, lastError: null };
 
 export async function refreshUniverse(productSet) {

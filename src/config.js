@@ -47,6 +47,7 @@ export const config = {
     minPositionPct: 0.25,
     maxPositionPct: 0.30,
     maxOpenPositions: 3,
+    minComponent: 12,            // each of technical / volume / smart money / research must pass on its own (of 25)
     stopMinPct: 0.025,
     stopMaxPct: 0.04,
     minRR: 2.5,
@@ -66,10 +67,10 @@ export const config = {
   copy: Object.freeze({
     minWinRate: 0.75, preferredWinRate: 0.80,
     windowDays: 90, minTrades: 30, minProfitFactor: 1.5,
-    minSpanDays: 7, minActiveDays: 5, maxTradesPerDay: 40,   // history must be long enough, and not bot-like (closes/day)
+    minSpanDays: 7, minActiveDays: 5, maxTradesPerDay: 40, minMedianHoldMin: 10,   // history must be long enough, and not bot-like (closes/day)
     maxCandidateAccount: 5_000_000,
     maxUnrealizedLossPct: 0.10, minAccountValue: 10_000, maxLastFillDays: 14,
-    maxTracked: 7, candidatePool: 200, reevalHours: 12,
+    maxTracked: 7, maxCopyPositions: 2,           // copies may use 2 of the 3 position slots; one stays free for my own analysis candidatePool: 200, reevalHours: 12,
     maxChasePct: 0.01, stopPct: 0.04, maxFillAgeMs: 120_000, minNotional: 10,
   }),
   // On-chain (Zerion) copy trading. Same win-rate rules as Hyperliquid (see config.copy); these are the on-chain specifics.
@@ -83,9 +84,11 @@ export const config = {
     pollMs: 20_000, maxFillAgeMs: 300_000, pricePollMs: 5_000,
     minLiquidityUsd: 200_000, minVolume24hUsd: 100_000, minPairAgeDays: 3,   // only copy into tokens we could realistically exit
   }),
+  // Trending / unusually-active detection. It only decides what gets researched FIRST; it never lowers a requirement.
+  movers: Object.freeze({ chg1h: 0.04, chg4h: 0.08, chg24h: 0.15, rvol: 2.5, maxMoversPerScan: 3, fastTrigger1h: 0.08, fastCheckMs: 60_000, fastCooldownMs: 15 * 60_000 }),
   scanIntervalMs: 5 * 60_000,
   confirmWindowMs: 15 * 60_000,
-  maxResearchPerScan: 5,
+  maxResearchPerScan: 6,
 };
 
 export const log = (...a) => console.log(new Date().toISOString(), ...a);

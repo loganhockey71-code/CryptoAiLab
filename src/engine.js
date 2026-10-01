@@ -5,7 +5,7 @@ import { db } from './db.js';
 import { feed, fetchCandles, loadProducts } from './exchange.js';
 import { hl } from './hyperliquid.js';
 import { onchainPx } from './onchainprices.js';
-import { refreshUniverse, restoreCooldowns, universe } from './universe.js';
+import { refreshUniverse, restoreCooldowns, universe, cgTrending } from './universe.js';
 import { snapshot, aggregate, rvol as calcRvol, atr, ema, rsi, candlePattern } from './indicators.js';
 import * as src from './sources.js';
 import { generateSignal, reflectOnTrade, llmAvailable } from './research.js';
@@ -26,7 +26,10 @@ export const state = {
   reflections: [],             // newest first (AI learning feed)
   closedToday: [],             // closed trades since UTC midnight
   recentClosed: [],            // newest first, feeds the Trade History panel
+  trending: new Set(),         // CoinGecko trending ids, refreshed every scan
+  ctx: null,                   // latest news/macro/politics context, reused by the fast mover scan
   newsFeed: { at: null, feeds: [], items: [] },   // everything the app read this scan (News & Politics panel)
+  freezeKeys: new Set(),       // breaker events that have already caused a freeze (so one event can never re-freeze)
   copyCooldown: new Map(),     // coin -> until (2h lockout after a copied position hits its stop)
   scan: { running: false, startedAt: null, finishedAt: null, count: 0, lastError: null, progress: '' },
   sources: {},                 // name -> { tier, ok, fetchedAt, error }
@@ -121,6 +124,9 @@ async function analyzeCoin(coin) {
     cs.atr15 = atr(m15);
     cs.patterns = { '5m': candlePattern(m5), '1h': candlePattern(h1) };
     cs.priceUp = m15.length > 2 && m15[m15.length - 1].c > m15[m15.length - 3].c;
+    cs.series5m = m5.slice(-30).map((c) => ({ t: c.t, c: c.c }));
+    const change = (arr, n) => (arr.length > n ? arr[arr.length - 1].c / arr[arr.length - 1 - n].c - 1 : 0);
+    cs.chg = { m15: change(m5, 3), h1: change(m5, 12), h4: change(h1, 4), h24: change(h1, 24) };
     if (coin.symbol === 'BTC') {
       state.btc = { ...riskLib.btcRegime(cs.snaps['1h']), at: Date.now() };
     }
@@ -193,6 +199,8 @@ async function runScan() {
     };
     for (const cs of state.coins.values()) cs.sentiment = cs.coin ? src.coinSentiment(news, cs.coin) : null;
 
+    state.trending = await cgTrending();
+    state.ctx = { news, macro, bills, onchain, politics };
     s.progress = 'evaluating setups';
     await evaluateCandidates({ news, macro, bills, onchain, politics });
     s.count++;
@@ -202,6 +210,120 @@ async function runScan() {
   } finally {
     s.running = false; s.finishedAt = Date.now(); s.progress = '';
   }
+}
+
+/* ------------------------------------------------------- movers + smart money */
+
+let smartMoneyProvider = null;
+export function setSmartMoneyProvider(fn) { smartMoneyProvider = fn; }
+
+const MOVER = config.movers;
+
+/** Live price change over the last 15m / 1h, from the stored 5m series and the live exchange price. */
+function liveChange(cs) {
+  const series = cs.series5m ?? [];
+  const live = cs.coin?.product && feed.tickAgeMs(cs.coin.product) <= 60_000 ? feed.price(cs.coin.product) : null;
+  const price = live ?? series[series.length - 1]?.c ?? null;
+  if (!price || !series.length) return { price, m15: 0, h1: 0 };
+  const at = (ms) => { const cutoff = (Date.now() - ms) / 1000; let ref = null; for (const c of series) if (c.t <= cutoff) ref = c; return ref ? price / ref.c - 1 : 0; };
+  return { price, m15: at(15 * 60_000), h1: at(3600_000) };
+}
+
+/** Is this asset trending or unusually active right now? Used to PRIORITISE research, never to skip any requirement. */
+export function activity(cs) {
+  const live = liveChange(cs), reasons = [];
+  let score = 0;
+  const up = (x, thr, label) => { if (x >= thr) { reasons.push(`${label} ${pct(x)}`); score = Math.max(score, x / thr); } };
+  up(live.h1, MOVER.chg1h, '1h');
+  up(cs.chg?.h4 ?? 0, MOVER.chg4h, '4h');
+  up(cs.chg?.h24 ?? 0, MOVER.chg24h, '24h');
+  if (cs.rvol != null && cs.rvol >= MOVER.rvol) { reasons.push(`volume ${cs.rvol.toFixed(1)}x normal`); score = Math.max(score, cs.rvol / MOVER.rvol); }
+  if (cs.coin && state.trending.has(cs.coin.id)) { reasons.push('trending on CoinGecko'); score = Math.max(score, 1.5); }
+  const dump = live.h1 <= -MOVER.chg1h || (cs.chg?.h24 ?? 0) <= -MOVER.chg24h;   // unusual, but we only buy: flagged, never prioritised
+  return { hot: reasons.length > 0, score, reasons, h1: live.h1, h24: cs.chg?.h24 ?? null, dump };
+}
+const rowActivity = (cs) => { const a = activity(cs); return { chg1h: a.h1, chg24h: a.h24, hot: a.hot, hotReasons: a.reasons, dump: a.dump }; };
+
+/* ------------------------------------------------------------ evaluation */
+
+/**
+ * Full independent check of ONE asset. It only becomes a candidate if it passes, on its own merits:
+ * technical + volume, smart money, research, and the 80/100 confluence; candle confirmation and every risk filter come after.
+ * A trending move helps an asset get looked at; it never lowers any of these bars.
+ */
+async function evaluateCoin(cs, trigger, ctxSources, lessons, stats) {
+  if (cs.evaluating) return;
+  cs.evaluating = true;
+  try { await evaluateCoinInner(cs, trigger, ctxSources, lessons, stats); } finally { cs.evaluating = false; }
+}
+
+async function evaluateCoinInner(cs, trigger, ctxSources, lessons, stats) {
+  const product = cs.coin.product;
+  const fp = await feed.freshPrice(product, R.staleMs);
+  if (fp.price == null) { await recordSkipped(cs, `price stream not verified fresh (age ${Math.round(fp.ageMs / 1000)}s): data unreliable`, { evidence: { trigger } }); return; }
+  if (!cs.partialScore || cs.partialScore.total < 30) { await recordSkipped(cs, `technical + volume too weak (${cs.partialScore ? cs.partialScore.total.toFixed(1) : 'n/a'}/50): confluence cannot reach ${R.minConfluence}`, { evidence: { trigger } }); return; }
+
+  // Smart money = derivatives positioning (funding / open interest) + what our >=75%-win-rate tracked traders hold in this coin right now.
+  const sm = smartMoneyProvider ? smartMoneyProvider(cs.symbol) : null;
+  const smB = riskLib.smartMoneyBonus(sm);
+  const deriv = await src.derivatives(cs.symbol); noteSource(deriv); cs.deriv = deriv;
+  const d = riskLib.derivativesScore(deriv, cs.priceUp);
+  const smartScore = Math.max(0, Math.min(25, d.score + smB.bonus));
+  if (sm && sm.net < 0) { await recordSkipped(cs, `smart-money requirement failed: ${smB.note}`, { evidence: { trigger, smartMoney: sm } }); return; }
+  if (smartScore < R.minComponent) { await recordSkipped(cs, `smart-money requirement not met: ${smartScore.toFixed(1)}/25 < ${R.minComponent} (${d.note}; ${smB.note})`, { evidence: { trigger, smartMoney: sm } }); return; }
+  if (cs.partialScore.total + smartScore + 25 < R.minConfluence) {
+    await recordSkipped(cs, `confluence cannot reach ${R.minConfluence}: technical+RVOL ${cs.partialScore.total.toFixed(1)} + smart money ${smartScore.toFixed(1)} + max research 25`, { evidence: { trigger } });
+    return;
+  }
+
+  const provenance = {
+    candles: { source: 'coinbase-exchange', tier: 1, at: cs.health.checkedAt }, priceAgeMs: fp.ageMs,
+    derivatives: { source: deriv.source, tier: 2, at: deriv.fetchedAt },
+    macro: { source: 'fred', tier: 3, ok: ctxSources.macro.ok, at: ctxSources.macro.fetchedAt },
+    legislation: { source: 'congress.gov', tier: 3, ok: ctxSources.bills.ok, at: ctxSources.bills.fetchedAt },
+    politics: { source: 'white house, federal register, fed, sec, cftc, bbc, npr, cnbc, google news, truth social mirror', tier: '3/4', ok: ctxSources.politics.ok, at: ctxSources.politics.fetchedAt },
+    onchain: { source: 'etherscan', tier: 4, ok: ctxSources.onchain.ok, at: ctxSources.onchain.fetchedAt },
+    news: { source: 'coindesk+cointelegraph rss', tier: 4, ok: ctxSources.news.ok, at: ctxSources.news.fetchedAt },
+  };
+  const tfSummary = Object.fromEntries(Object.entries(cs.snaps).map(([k, v]) => [k, v && { trendUp: v.trendUp, rsi: v.rsi && +v.rsi.toFixed(1), macdHist: v.macdHist, ema20: v.ema20, ema50: v.ema50 }]));
+  const act = activity(cs);
+  const sig = await generateSignal({
+    symbol: cs.symbol, name: cs.coin.name, price: fp.price, btcRegime: state.btc.regime, timeframes: tfSummary, rvol: cs.rvol,
+    derivatives: deriv.data, macro: ctxSources.macro.data, legislation: ctxSources.bills.data, onchain: ctxSources.onchain.data, politics: compactPolitics(ctxSources.politics),
+    news: cs.sentiment ? { coin: cs.sentiment, market: (ctxSources.news.data || []).slice(0, 8) } : { market: (ctxSources.news.data || []).slice(0, 8) },
+    activity: { whySelected: trigger.kind === 'mover' ? 'unusually active / trending' : 'regular scan', flags: act.reasons, change1h: pct(act.h1), change24h: act.h24 == null ? null : pct(act.h24) },
+    smartMoney: sm ? { trackedTradersLong: sm.longs, trackedTradersShort: sm.shorts, detail: sm.traders.map((t) => ({ side: t.side, winRate: +t.winRate.toFixed(2) })) } : 'no tracked trader currently holds this coin',
+    provenance,
+  }, lessons.map((l) => ({ outcome: l.outcome, symbol: l.symbol, lesson: l.lesson })));
+  if (!sig) { await recordSkipped(cs, 'Research Brain returned no valid signal', { evidence: { trigger } }); return; }
+  cs.lastLlmAt = Date.now();
+
+  const mult = historyMultiplier(cs.symbol);
+  sig.confidence = Math.min(100, sig.confidence * mult);
+  const conf = riskLib.confluence({ snaps: cs.snaps, rvol: cs.rvol, signal: sig, derivatives: deriv, priceUp: cs.priceUp, smartMoney: sm });
+  cs.score = conf.total; cs.signalFresh = Date.now();
+  const gates = riskLib.requirements(conf, sm);
+  conf.gates = gates;
+  const evidence = { provenance, trigger, smartMoney: sm, supporting: sig.supporting, conflicting: sig.conflicting, keyRisks: sig.keyRisks, provider: sig.provider, historyMultiplier: mult, patternStats: stats };
+  const base = { direction: sig.direction, confidence: sig.confidence, confluence: conf, evidence };
+
+  cs.signal = { direction: sig.direction, confidence: sig.confidence, at: Date.now(), status: 'evaluated' };
+  if (sig.direction !== 'bullish') { await recordSkipped(cs, `Research bias is ${sig.direction} (long-only v1)`, base); cs.signal.status = 'skipped'; return; }
+  if (gates.fails.length) { await recordSkipped(cs, `requirements not met: ${gates.fails.join('; ')}`, base); cs.signal.status = 'skipped'; return; }
+  if (conf.total < R.minConfluence) { await recordSkipped(cs, `confluence ${conf.total} < ${R.minConfluence}`, base); cs.signal.status = 'skipped'; return; }
+
+  const row = await db.insertSignal({
+    symbol: cs.symbol, source_timestamp: new Date().toISOString(), direction: sig.direction, confidence: sig.confidence,
+    reference_price: fp.price, target_price: sig.target, stop_price: sig.stop, evidence_summary: sig.evidenceSummary,
+    evidence, confluence: conf, confluence_score: conf.total, btc_regime: state.btc.regime,
+    prediction: { expected_direction: 'up', confidence: sig.confidence, target: sig.target, stop: sig.stop, timeframe_hours: sig.timeframeHours, made_at: new Date().toISOString(), reference_price: fp.price, trigger },
+    status: 'awaiting_confirmation',
+  });
+  const id = row?.id ?? `mem-${Date.now()}-${cs.symbol}`;
+  state.pending.set(id, { id, symbol: cs.symbol, product, refPrice: fp.price, createdAt: Date.now(), sig, conf, evidence, trigger, seen: 0, ctx: { patterns: cs.patterns, sentiment: cs.sentiment } });
+  cs.signal.status = 'awaiting_confirmation';
+  logDecision('candidate', cs.symbol, `OWN IDEA${trigger.kind === 'mover' ? ` (${trigger.reasons.join(', ')})` : ''}: bullish candidate, confluence ${conf.total}, confidence ${sig.confidence.toFixed(0)}%: waiting for candle confirmation`);
+  feed.backfill1m(product);
 }
 
 async function evaluateCandidates(ctxSources) {
@@ -217,78 +339,56 @@ async function evaluateCandidates(ctxSources) {
   if (open >= R.maxOpenPositions) { logDecision('skipped', '*', `${open} positions/pending signals already (max ${R.maxOpenPositions})`); return; }
   if (!llmAvailable()) { logDecision('info', '*', 'No LLM key configured (GEMINI_API_KEY / OPENROUTER_API_KEY): Research Brain offline, staying in cash'); return; }
 
-  // Mathematical feasibility: technical+RVOL max 50, derivatives max 25, research max 25. Need >= 80 overall.
-  const derivAvailable = true; // Coinglass, or the OKX public fallback; per-coin availability is checked below
-  const needPartial = R.minConfluence - 25 - (derivAvailable ? 25 : 0);
-  if (!derivAvailable) {
-    logDecision('skipped', '*', `Derivatives data unavailable (COINGLASS_API_KEY not set): confluence is capped at 75 < ${R.minConfluence}, so no entries are possible`);
-    return;
-  }
   const now = Date.now();
-  const shortlist = [...state.coins.values()]
-    .filter((cs) => cs.coin?.tradable && cs.health.ok && cs.partialScore && cs.partialScore.total >= Math.max(needPartial, 30))
+  // The WHOLE Top 100 is scanned. Anything that could still reach 80/100 is eligible, trending or not.
+  const eligible = [...state.coins.values()]
+    .filter((cs) => cs.coin?.tradable && cs.health.ok && cs.partialScore && cs.partialScore.total >= 30)
     .filter((cs) => !(cs.coin.cooldownUntil && cs.coin.cooldownUntil > now))
+    .filter((cs) => now - (cs.lastLlmAt ?? 0) > 20 * 60_000)
     .filter((cs) => ![...state.positions.values()].some((p) => p.symbol === cs.symbol) && ![...state.pending.values()].some((p) => p.symbol === cs.symbol))
-    .sort((a, b) => b.partialScore.total - a.partialScore.total)
-    .slice(0, config.maxResearchPerScan);
+    .map((cs) => ({ cs, a: activity(cs) }));
+  const hotAll = [...state.coins.values()].filter((cs) => cs.coin?.tradable && cs.health.ok && activity(cs).hot);
+
+  // Trending / unusually active assets are looked at FIRST, then the best of the rest fill the remaining research slots.
+  const movers = eligible.filter((x) => x.a.hot && !x.a.dump).sort((a, b) => b.a.score - a.a.score).slice(0, MOVER.maxMoversPerScan);
+  const moverSet = new Set(movers.map((x) => x.cs));
+  const regular = eligible.filter((x) => !moverSet.has(x.cs)).sort((a, b) => b.cs.partialScore.total - a.cs.partialScore.total).slice(0, Math.max(0, config.maxResearchPerScan - movers.length));
+  const lineup = [
+    ...movers.map((x) => ({ cs: x.cs, trigger: { kind: 'mover', reasons: x.a.reasons, h1: x.a.h1, h24: x.a.h24, rvol: x.cs.rvol } })),
+    ...regular.map((x) => ({ cs: x.cs, trigger: { kind: 'scan', reasons: [`technical + volume ${x.cs.partialScore.total.toFixed(0)}/50`], h1: x.a.h1, h24: x.a.h24, rvol: x.cs.rvol } })),
+  ];
+  logDecision('info', '*', `scanned all ${state.coins.size} Top-100 coins: ${hotAll.length} trending/unusually active (${hotAll.slice(0, 6).map((c) => c.symbol).join(', ') || 'none'}); researching ${movers.length} mover(s) + ${regular.length} regular candidate(s)`);
 
   const lessons = state.reflections.slice(0, 5);
   const stats = patternStats();
-  for (const cs of shortlist) {
+  for (const { cs, trigger } of lineup) {
     if (state.positions.size + state.pending.size >= R.maxOpenPositions) break;
-    const product = cs.coin.product;
-    const fp = await feed.freshPrice(product, R.staleMs);
-    if (fp.price == null) { await recordSkipped(cs, `price stream not verified fresh (age ${Math.round(fp.ageMs / 1000)}s): data unreliable`); continue; }
-
-    const deriv = await src.derivatives(cs.symbol); noteSource(deriv); cs.deriv = deriv;
-    const d = riskLib.derivativesScore(deriv, cs.priceUp);
-    if (!d.available || cs.partialScore.total + d.score + 25 < R.minConfluence) {
-      await recordSkipped(cs, `confluence cannot reach ${R.minConfluence}: technical+RVOL ${cs.partialScore.total.toFixed(1)} + derivatives ${d.score.toFixed(1)} + max research 25 (${d.note})`);
-      continue;
-    }
-
-    const provenance = {
-      candles: { source: 'coinbase-exchange', tier: 1, at: cs.health.checkedAt }, priceAgeMs: fp.ageMs,
-      derivatives: { source: deriv.source, tier: 2, at: deriv.fetchedAt },
-      macro: { source: 'fred', tier: 3, ok: ctxSources.macro.ok, at: ctxSources.macro.fetchedAt },
-      legislation: { source: 'congress.gov', tier: 3, ok: ctxSources.bills.ok, at: ctxSources.bills.fetchedAt },
-      politics: { source: 'white house, federal register, fed, sec, cftc, bbc, npr, cnbc, google news, truth social mirror', tier: '3/4', ok: ctxSources.politics.ok, at: ctxSources.politics.fetchedAt },
-      onchain: { source: 'etherscan', tier: 4, ok: ctxSources.onchain.ok, at: ctxSources.onchain.fetchedAt },
-      news: { source: 'coindesk+cointelegraph rss', tier: 4, ok: ctxSources.news.ok, at: ctxSources.news.fetchedAt },
-    };
-    const tfSummary = Object.fromEntries(Object.entries(cs.snaps).map(([k, v]) => [k, v && { trendUp: v.trendUp, rsi: v.rsi && +v.rsi.toFixed(1), macdHist: v.macdHist, ema20: v.ema20, ema50: v.ema50 }]));
-    const sig = await generateSignal({
-      symbol: cs.symbol, name: cs.coin.name, price: fp.price, btcRegime: state.btc.regime, timeframes: tfSummary, rvol: cs.rvol,
-      derivatives: deriv.data, macro: ctxSources.macro.data, legislation: ctxSources.bills.data, onchain: ctxSources.onchain.data, politics: compactPolitics(ctxSources.politics),
-      news: cs.sentiment ? { coin: cs.sentiment, market: (ctxSources.news.data || []).slice(0, 8) } : { market: (ctxSources.news.data || []).slice(0, 8) },
-      provenance,
-    }, lessons.map((l) => ({ outcome: l.outcome, symbol: l.symbol, lesson: l.lesson })));
-    if (!sig) { await recordSkipped(cs, 'Research Brain returned no valid signal', {}); continue; }
-
-    const mult = historyMultiplier(cs.symbol);
-    sig.confidence = Math.min(100, sig.confidence * mult);
-    const conf = riskLib.confluence({ snaps: cs.snaps, rvol: cs.rvol, signal: sig, derivatives: deriv, priceUp: cs.priceUp });
-    cs.score = conf.total; cs.signalFresh = Date.now();
-    const evidence = { provenance, supporting: sig.supporting, conflicting: sig.conflicting, keyRisks: sig.keyRisks, provider: sig.provider, historyMultiplier: mult, patternStats: stats };
-    const base = { direction: sig.direction, confidence: sig.confidence, confluence: conf, evidence };
-
-    cs.signal = { direction: sig.direction, confidence: sig.confidence, at: Date.now(), status: 'evaluated' };
-    if (sig.direction !== 'bullish') { await recordSkipped(cs, `Research bias is ${sig.direction} (long-only v1)`, base); cs.signal.status = 'skipped'; continue; }
-    if (conf.total < R.minConfluence) { await recordSkipped(cs, `confluence ${conf.total} < ${R.minConfluence}`, base); cs.signal.status = 'skipped'; continue; }
-
-    const row = await db.insertSignal({
-      symbol: cs.symbol, source_timestamp: new Date().toISOString(), direction: sig.direction, confidence: sig.confidence,
-      reference_price: fp.price, target_price: sig.target, stop_price: sig.stop, evidence_summary: sig.evidenceSummary,
-      evidence, confluence: conf, confluence_score: conf.total, btc_regime: state.btc.regime,
-      prediction: { expected_direction: 'up', confidence: sig.confidence, target: sig.target, stop: sig.stop, timeframe_hours: sig.timeframeHours, made_at: new Date().toISOString(), reference_price: fp.price },
-      status: 'awaiting_confirmation',
-    });
-    const id = row?.id ?? `mem-${Date.now()}-${cs.symbol}`;
-    state.pending.set(id, { id, symbol: cs.symbol, product, refPrice: fp.price, createdAt: Date.now(), sig, conf, evidence, seen: 0, ctx: { patterns: cs.patterns, sentiment: cs.sentiment } });
-    cs.signal.status = 'awaiting_confirmation';
-    logDecision('candidate', cs.symbol, `bullish candidate (confluence ${conf.total}, confidence ${sig.confidence.toFixed(0)}%): waiting for candle confirmation`);
-    feed.backfill1m(product);
+    await evaluateCoin(cs, trigger, ctxSources, lessons, stats);
   }
+}
+
+/** Between full scans: if something is suddenly ripping (e.g. +8% in an hour), analyse it now instead of waiting up to 5 minutes. */
+async function moverWatch() {
+  if (state.scan.running || !state.ctx || !state.btc.bullish || !llmAvailable()) return;
+  if (!riskLib.tradingGate(state.portfolio).allowed) return;
+  if (state.positions.size + state.pending.size >= R.maxOpenPositions) return;
+  const now = Date.now();
+  const hit = [...state.coins.values()]
+    .filter((cs) => cs.coin?.tradable && cs.health?.ok && !cs.evaluating && !(cs.coin.cooldownUntil && cs.coin.cooldownUntil > now))
+    .filter((cs) => now - (cs.lastFast ?? 0) > MOVER.fastCooldownMs && now - (cs.lastLlmAt ?? 0) > MOVER.fastCooldownMs)
+    .filter((cs) => ![...state.positions.values()].some((p) => p.symbol === cs.symbol) && ![...state.pending.values()].some((p) => p.symbol === cs.symbol))
+    .map((cs) => ({ cs, a: activity(cs) }))
+    .filter((x) => x.a.h1 >= MOVER.fastTrigger1h)
+    .sort((a, b) => b.a.h1 - a.a.h1)[0];
+  if (!hit) return;
+  const { cs } = hit;
+  cs.lastFast = now;
+  logDecision('info', cs.symbol, `FAST SCAN: up ${pct(hit.a.h1)} in the last hour. Re-analysing now instead of waiting for the next scan`);
+  await analyzeCoin(cs.coin);
+  if (!cs.health.ok) return;
+  cs.partialScore = partialScore(cs);
+  const a = activity(cs);
+  await evaluateCoin(cs, { kind: 'mover', fast: true, reasons: a.reasons.length ? a.reasons : [`1h ${pct(hit.a.h1)}`], h1: a.h1, h24: a.h24, rvol: cs.rvol }, state.ctx, state.reflections.slice(0, 5), patternStats());
 }
 
 /* ------------------------------------------------- candle confirmation + entry */
@@ -346,18 +446,18 @@ async function tryEnter(p, confirmation) {
     if (wanted < 10) { logDecision('skipped', p.symbol, 'insufficient cash'); await db.updateSignal(p.id, { status: 'skipped', skip_reason: 'insufficient cash' }); return; }
     const entryPx = riskLib.entryFill(live);
     const qty = wanted / entryPx, notional = qty * entryPx, fee = riskLib.feeOn(notional);
-    const why = `Confluence ${p.conf.total}/100 (tech ${p.conf.technical}, RVOL ${p.conf.rvol}, research ${p.conf.research}, derivatives ${p.conf.derivatives}); BTC 1h ${btc.regime}; net R:R ${shaped.rr.toFixed(2)}; candle confirmed. ${p.sig.evidenceSummary}`;
+    const why = `OWN IDEA${p.trigger?.kind === 'mover' ? ` (trending/unusual: ${p.trigger.reasons.join(', ')})` : ' (regular scan)'}. Confluence ${p.conf.total}/100 (tech ${p.conf.technical}, RVOL ${p.conf.rvol}, research ${p.conf.research}, derivatives ${p.conf.derivatives}); BTC 1h ${btc.regime}; net R:R ${shaped.rr.toFixed(2)}; candle confirmed. ${p.sig.evidenceSummary}`;
     const row = await db.insertTrade({
       symbol: p.symbol, signal_id: p.id.startsWith('mem-') ? null : p.id, status: 'open', entry_price: entryPx, qty, notional,
       target_price: shaped.target, stop_price: shaped.stop, high_water: entryPx, rr: shaped.rr, confluence_score: p.conf.total, rationale: why,
-      fee_entry: fee, prediction: { expected_direction: 'up', target: p.sig.target, stop: p.sig.stop, confirmation }, evidence_used: `${p.sig.evidenceSummary} | notes: ${JSON.stringify(p.conf.notes)}`,
+      fee_entry: fee, entry_trigger: p.trigger?.kind ?? 'scan', prediction: { expected_direction: 'up', target: p.sig.target, stop: p.sig.stop, confirmation, trigger: p.trigger ?? null }, evidence_used: `${p.sig.evidenceSummary} | notes: ${JSON.stringify(p.conf.notes)}`,
       expected_direction: 'up', confidence: p.sig.confidence, candle_pattern: `5m: ${p.ctx.patterns?.['5m']}; 1h: ${p.ctx.patterns?.['1h']}; 1m confirm close ${confirmation.c}`, market_regime: `BTC 1h ${btc.regime}`,
     });
     const id = row?.id ?? `mem-trade-${Date.now()}`;
     state.portfolio.cash -= notional + fee;
     state.positions.set(id, {
       id, symbol: p.symbol, product: p.product, signalId: p.id, qty, entry: entryPx, notional, fee, stop: shaped.stop, target: shaped.target,
-      trailing: null, highWater: entryPx, openedAt: Date.now(), rationale: why, lastPrice: live, sizePct,
+      trailing: null, highWater: entryPx, openedAt: Date.now(), rationale: why, lastPrice: live, sizePct, trigger: p.trigger ?? { kind: 'scan', reasons: [] },
       ctx: { conf: p.conf, sig: p.sig, patterns: p.ctx.patterns, sentiment: p.ctx.sentiment, btc: btc.regime, confirmation },
     });
     await db.updateSignal(p.id, { status: 'entered', trade_id: row?.id ?? null, rr: shaped.rr });
@@ -417,6 +517,7 @@ function historyFromDb(t) {
     id: t.id, symbol: t.symbol, side: t.side ?? 'long', source: t.source ?? 'strategy', trader: t.source_trader ?? null,
     entry: Number(t.entry_price), exit: Number(t.exit_price), notional: Number(t.final_pnl_pct) ? Math.abs(Number(t.final_pnl) / Number(t.final_pnl_pct)) : Number(t.notional), pnl: Number(t.final_pnl), pnlPct: Number(t.final_pnl_pct),
     reason: t.exit_reason, openedAt: new Date(t.entry_time).getTime(), closedAt: new Date(t.exit_time).getTime(),
+    origin: String(t.source ?? '').startsWith('copy_') ? 'mimic' : 'own', trigger: t.entry_trigger ?? null, triggerReasons: t.prediction?.trigger?.reasons ?? [],
   };
 }
 
@@ -425,6 +526,7 @@ function recordHistory(pos, trade, notional) {
     id: pos.id, symbol: pos.symbol, side: pos.side ?? 'long', source: sourceOf(pos), trader: pos.copy?.trader ?? null,
     entry: pos.entry, exit: trade.exit_price, notional, pnl: trade.final_pnl, pnlPct: trade.final_pnl_pct, reason: trade.exit_reason,
     openedAt: pos.openedAt, closedAt: Date.now(),
+    origin: pos.copy ? 'mimic' : 'own', trigger: pos.trigger?.kind ?? null, triggerReasons: pos.trigger?.reasons ?? [],
   });
   if (state.recentClosed.length > 200) state.recentClosed.length = 200;
 }
@@ -433,7 +535,9 @@ function historySummary() {
   const all = state.recentClosed;
   const wins = all.filter((t) => t.pnl > 0), losses = all.filter((t) => t.pnl <= 0);
   const sum = (a) => a.reduce((x, t) => x + t.pnl, 0);
+  const group = (o) => { const g = all.filter((t) => t.origin === o); return { count: g.length, wins: g.filter((t) => t.pnl > 0).length, losses: g.filter((t) => t.pnl <= 0).length, net: sum(g) }; };
   return {
+    byOrigin: { own: group('own'), mimic: group('mimic') },
     trades: all.slice(0, 60).map((t) => ({ ...t, result: t.pnl > 0 ? 'win' : 'loss' })),
     stats: {
       count: all.length, wins: wins.length, losses: losses.length, winRate: all.length ? wins.length / all.length : null, net: sum(all),
@@ -515,6 +619,7 @@ export async function openCopyPosition(o) {
   const gate = riskLib.tradingGate(p, now);
   if (!gate.allowed) return { ok: false, reason: `circuit breaker: ${gate.reason}` };
   if (state.positions.size + state.pending.size >= R.maxOpenPositions) return { ok: false, reason: `already ${state.positions.size + state.pending.size} open positions/pending signals (max ${R.maxOpenPositions})` };
+  if ([...state.positions.values()].filter((x) => x.copy).length >= config.copy.maxCopyPositions) return { ok: false, reason: `copy trades are limited to ${config.copy.maxCopyPositions} of ${R.maxOpenPositions} slots so one stays free for my own analysis` };
   if ([...state.positions.values()].some((x) => x.venue === (o.venue ?? 'hl') && x.coin === o.coin)) return { ok: false, reason: `already copying a ${o.coin} position` };
   const cd = state.copyCooldown.get(o.coin);
   if (cd && cd > now) return { ok: false, reason: `${o.coin} cooldown after stop-loss until ${new Date(cd).toISOString()}` };
@@ -588,6 +693,16 @@ function freeze(reason) {
   persistPortfolio(true);
 }
 
+/** Conditions that call for a freeze, each keyed by the trade that completed it. */
+function breakerTriggers() {
+  const out = [];
+  const stops = state.closedToday.filter((t) => t.exit_reason === 'stop_loss');
+  if (stops.length >= R.freezeStopLossesPerDay) out.push({ key: `stops:${stops[stops.length - 1].id}`, reason: `${stops.length} stop-loss hits today` });
+  const last2 = state.closedToday.slice(-2);
+  if (last2.length === 2 && last2.every((t) => t.final_pnl < 0) && last2[1].exitAt - last2[0].exitAt <= R.consecutiveLossWindowMin * 60_000) out.push({ key: `pair:${last2[1].id}`, reason: '2 consecutive losses within 60 minutes' });
+  return out;
+}
+
 function checkBreakers() {
   const p = state.portfolio, now = Date.now();
   const today = utcDay(now);
@@ -610,10 +725,11 @@ function checkBreakers() {
     for (const pend of [...state.pending.values()]) failSignal(pend, 'skipped', 'daily loss cap hit');
     persistPortfolio(true);
   }
-  const stops = state.closedToday.filter((t) => t.exit_reason === 'stop_loss').length;
-  if (stops >= R.freezeStopLossesPerDay) freeze(`${stops} stop-loss hits today`);
-  const last2 = state.closedToday.slice(-2);
-  if (last2.length === 2 && last2.every((t) => t.final_pnl < 0) && last2[1].exitAt - last2[0].exitAt <= R.consecutiveLossWindowMin * 60_000) freeze('2 consecutive losses within 60 minutes');
+  for (const t of breakerTriggers()) {
+    if (state.freezeKeys.has(t.key)) continue;
+    state.freezeKeys.add(t.key);
+    freeze(t.reason);
+  }
 }
 
 export function clearManualReview() {
@@ -712,6 +828,8 @@ export async function start() {
   }
   state.closedToday = (today ?? []).map((t) => ({ ...t, final_pnl: Number(t.final_pnl), exitAt: new Date(t.exit_time).getTime() }));
 
+  for (const t of breakerTriggers()) state.freezeKeys.add(t.key);
+
   for (const t of open ?? []) {
     const isCopy = String(t.source ?? '').startsWith('copy_');
     state.positions.set(t.id, {
@@ -721,7 +839,7 @@ export async function start() {
       highWater: Number(t.high_water ?? t.entry_price), openedAt: new Date(t.entry_time).getTime(), rationale: t.rationale, lastPrice: null,
       ...(isCopy
         ? { venue: t.source === 'copy_zerion' ? 'onchain' : 'hl', extra: t.prediction ?? null, coin: t.source === 'copy_zerion' ? (t.prediction?.assetKey ?? t.symbol) : t.symbol, leaderSize: Number(t.leader_size ?? 0), copy: { trader: t.source_trader, winRate: Number(t.confidence ?? 0) / 100, tier: t.prediction?.tier ?? 'minimum', leaderPx: Number(t.leader_fill_price), leaderTime: new Date(t.leader_fill_time).getTime(), k: Number(t.prediction?.k ?? 0), latencyMs: 0 } }
-        : { product: `${t.symbol}-USD` }),
+        : { product: `${t.symbol}-USD`, trigger: { kind: t.entry_trigger ?? 'scan', reasons: t.prediction?.trigger?.reasons ?? [] } }),
       ctx: { conf: { notes: {}, technical: 0, rvol: 0, research: 0, derivatives: 0, total: Number(t.confluence_score ?? 0) }, sig: { evidenceSummary: t.evidence_used ?? '', supporting: [], conflicting: [], confidence: Number(t.confidence ?? 0) }, patterns: {}, btc: t.market_regime },
     });
   }
@@ -732,6 +850,7 @@ export async function start() {
   feed.setProducts([...state.positions.values()].map((p) => p.product).filter(Boolean));
   feed.start();
   setInterval(() => housekeeping().catch((e) => warn('housekeeping', e.message)), 1000);
+  setInterval(() => moverWatch().catch((e) => warn('mover watch', e.message)), config.movers.fastCheckMs);
   setInterval(() => persistPortfolio(), 15_000);
 
   (async () => {
@@ -767,13 +886,14 @@ export function snapshotForUi() {
       tradable: coin.tradable, excluded: coin.excludedReason, health: cs?.health?.ok ? 'ok' : cs?.health?.reason ?? 'pending',
       cooldownUntil: coin.cooldownUntil && coin.cooldownUntil > now ? coin.cooldownUntil : null,
       stale: coin.product ? feed.tickAgeMs(coin.product) > R.staleMs : null,
+      ...(cs ? rowActivity(cs) : {}),
     };
   });
   const positions = [...state.positions.values()].map((x) => {
     const px = priceOf(x), ex = exitFillFor(x.side, px);
     const net = (x.realized ?? 0) + x.qty * (x.side === 'short' ? x.entry - ex : ex - x.entry) - riskLib.feeOn(x.qty * ex) - x.fee;
     return {
-      id: x.id, symbol: x.symbol, side: x.side ?? 'long', source: x.copy ? 'copy' : 'strategy', venue: x.venue ?? 'coinbase', trader: x.copy?.trader ?? null, traderWinRate: x.copy?.winRate ?? null,
+      id: x.id, symbol: x.symbol, side: x.side ?? 'long', source: x.copy ? 'copy' : 'strategy', origin: x.copy ? 'mimic' : 'own', trigger: x.trigger ?? null, venue: x.venue ?? 'coinbase', trader: x.copy?.trader ?? null, traderWinRate: x.copy?.winRate ?? null,
       leaderPx: x.copy?.leaderPx ?? null, entry: x.entry, price: px, target: x.target, stop: x.stop, trailing: x.trailing,
       rr: x.target ? (x.target - x.entry) / (x.entry - x.stop) : null, qty: x.qty, notional: x.notional, pnl: net, pnlPct: net / (x.initCost ?? (x.notional + x.fee)), openedAt: x.openedAt, why: x.rationale,
     };

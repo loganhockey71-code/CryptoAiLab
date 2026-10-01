@@ -69,6 +69,8 @@ function renderStats(s) {
   } else b.classList.add('hidden');
 }
 
+const chgCell = (r) => { const f = (x) => (x == null ? '—' : `<span class="${cls(x)}">${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%</span>`); return `${f(r.chg1h)} <span class="muted">/</span> ${f(r.chg24h)}`; };
+
 function renderTable(s) {
   const q = $('#filter').value.trim().toLowerCase();
   const gate = s.btc.bullish;
@@ -88,8 +90,8 @@ function renderTable(s) {
     const disc = r.discrepancy ? ` <span class="warn" title="${esc(r.discrepancy)}">⚠</span>` : '';
     const score = r.score == null ? '<span class="muted">—</span>' : `<span class="${r.score >= s.limits.minConfluence ? 'up' : ''}">${r.score.toFixed(0)}</span>`;
     return `<tr data-sym="${esc(r.symbol)}" class="${r.symbol === selected ? 'sel' : ''} ${r.tradable ? '' : 'off'}">
-      <td class="muted" title="market-cap rank #${r.cgRank}">${r.rank}${disc}</td><td><b>${esc(r.symbol)}</b> <span class="muted">${esc(r.name)}</span></td>
-      <td class="r">${price(r.price)}</td><td>${candle}</td><td>${sig}</td><td class="r">${score}</td><td>${gateCell}</td>
+      <td class="muted" title="market-cap rank #${r.cgRank}">${r.rank}${disc}</td><td><b>${esc(r.symbol)}</b> <span class="muted">${esc(r.name)}</span>${r.hot ? ` <span class="pill hot" title="${esc((r.hotReasons || []).join(', '))}">${r.dump ? 'UNUSUAL' : 'HOT'}</span>` : r.dump ? ' <span class="pill bad" title="sharp drop">DUMP</span>' : ''}</td>
+      <td class="r">${price(r.price)}</td><td class="r">${chgCell(r)}</td><td>${candle}</td><td>${sig}</td><td class="r">${score}</td><td>${gateCell}</td>
       <td class="r ${r.rvol > 1.5 ? 'up' : ''}">${r.rvol == null ? '—' : r.rvol.toFixed(2)}</td>
       <td class="r">${r.funding == null ? '—' : r.funding.toFixed(4) + '%'}</td>
       <td class="r ${cls(r.sentiment)}" title="${r.sentimentCount} headline(s)">${r.sentiment == null ? '—' : r.sentiment.toFixed(2)}</td><td>${data}</td></tr>`;
@@ -101,7 +103,7 @@ function renderPositions(s) {
   const pend = s.pending.map((p) => `<div class="item"><div class="meta"><b>${esc(p.symbol)}</b><span class="pill amber">awaiting candle confirmation</span><span>ref ${price(p.refPrice)}</span><span>score ${p.score}</span><span>${ago(p.createdAt)}</span></div></div>`).join('');
   if (!s.positions.length && !pend) { el.innerHTML = '<div class="empty">100% cash. No open paper positions.</div>'; return; }
   el.innerHTML = s.positions.map((p) => `<div class="item" data-sym="${esc(p.symbol)}" style="cursor:pointer">
-    <div class="meta"><b>${esc(p.symbol)}</b><span class="pill ${p.side === 'short' ? 'bad' : 'good'}">${esc(p.side)}</span>${p.source === 'copy' ? `<span class="pill amber" title="${esc(p.trader)}">copy ${p.venue === 'onchain' ? 'on-chain ' : ''}${esc(p.trader.slice(0, 8))} · ${(p.traderWinRate * 100).toFixed(0)}% win rate</span>` : ''}<span>entry ${price(p.entry)}</span>${p.leaderPx ? `<span>leader ${price(p.leaderPx)}</span>` : ''}<span>now ${price(p.price)}</span>${p.target ? `<span>target ${price(p.target)}</span>` : ''}<span>${p.source === 'copy' ? 'hard stop' : 'stop'} ${price(p.stop)}</span>${p.trailing ? `<span>trail ${price(p.trailing)}</span>` : ''}${p.rr != null ? `<span>R:R ${p.rr.toFixed(2)}</span>` : ''}<span>${money(p.notional)}</span></div>
+    <div class="meta"><b>${esc(p.symbol)}</b><span class="pill ${p.side === 'short' ? 'bad' : 'good'}">${esc(p.side)}</span>${p.source === 'copy' ? '' : `<span class="pill own" title="${esc((p.trigger?.reasons || []).join(', '))}">OWN IDEA${p.trigger?.kind === 'mover' ? ' · trending/unusual mover' : ''}</span>`}${p.source === 'copy' ? `<span class="pill amber" title="${esc(p.trader)}">copy ${p.venue === 'onchain' ? 'on-chain ' : ''}${esc(p.trader.slice(0, 8))} · ${(p.traderWinRate * 100).toFixed(0)}% win rate</span>` : ''}<span>entry ${price(p.entry)}</span>${p.leaderPx ? `<span>leader ${price(p.leaderPx)}</span>` : ''}<span>now ${price(p.price)}</span>${p.target ? `<span>target ${price(p.target)}</span>` : ''}<span>${p.source === 'copy' ? 'hard stop' : 'stop'} ${price(p.stop)}</span>${p.trailing ? `<span>trail ${price(p.trailing)}</span>` : ''}${p.rr != null ? `<span>R:R ${p.rr.toFixed(2)}</span>` : ''}<span>${money(p.notional)}</span></div>
     <div><b class="${cls(p.pnl)}">${money(p.pnl)} (${pct(p.pnlPct)})</b> <span class="muted">net of fees/slippage · opened ${ago(p.openedAt)}</span></div>
     <div class="why"><b>Why it entered:</b> ${esc(p.why)}</div></div>`).join('') + pend;
 }
@@ -129,6 +131,9 @@ function renderReflections(s) {
 
 const reasonLabel = { stop_loss: 'hit stop-loss', trailing_stop: 'trailing stop', momentum_reversal: 'momentum reversed', leader_exit: 'trader exited', leader_flip: 'trader flipped', leader_exit_while_offline: 'trader exited (offline)', circuit_breaker_daily_loss: 'daily loss cap' };
 const sourceLabel = (t) => (t.source === 'copy_hyperliquid' ? `copy · Hyperliquid ${t.trader ? t.trader.slice(0, 6) : ''}` : t.source === 'copy_zerion' ? `copy · on-chain ${t.trader ? t.trader.slice(0, 6) : ''}` : 'LLM strategy');
+const typePill = (t) => (t.origin === 'mimic'
+  ? `<span class="pill amber">MIMIC</span> <span class="muted">${esc(sourceLabel(t).replace('copy · ', ''))}</span>`
+  : `<span class="pill own">OWN IDEA</span> <span class="muted" title="${esc((t.triggerReasons || []).join(', '))}">${t.trigger === 'mover' ? 'trending / unusual mover' : 'regular scan'}</span>`);
 const held = (a, b) => { const m = Math.max(0, (b - a) / 60000); return m < 90 ? `${m.toFixed(0)}m` : m < 2880 ? `${(m / 60).toFixed(1)}h` : `${(m / 1440).toFixed(1)}d`; };
 
 function renderHistory(h) {
@@ -137,12 +142,12 @@ function renderHistory(h) {
   const chip = (label, val, c = '') => `<div class="chip"><b class="${c}">${val}</b><span>${label}</span></div>`;
   $('#history-stats').innerHTML = s.count
     ? [chip('Trades', s.count), chip('Won', s.wins, 'up'), chip('Lost', s.losses, 'down'), chip('Win rate', (s.winRate * 100).toFixed(0) + '%', s.winRate >= 0.5 ? 'up' : 'down'), chip('Net P&L', money(s.net), cls(s.net)),
-       chip('Avg win', money(s.avgWin), 'up'), chip('Avg loss', money(s.avgLoss), 'down'), chip('Best', money(s.best), cls(s.best)), chip('Worst', money(s.worst), cls(s.worst))].join('')
+       chip('Own ideas', `${h.byOrigin.own.wins}W–${h.byOrigin.own.losses}L · ${money(h.byOrigin.own.net)}`, cls(h.byOrigin.own.net)), chip('Mimic', `${h.byOrigin.mimic.wins}W–${h.byOrigin.mimic.losses}L · ${money(h.byOrigin.mimic.net)}`, cls(h.byOrigin.mimic.net)), chip('Avg win', money(s.avgWin), 'up'), chip('Avg loss', money(s.avgLoss), 'down'), chip('Best', money(s.best), cls(s.best)), chip('Worst', money(s.worst), cls(s.worst))].join('')
     : '';
   $('#history').innerHTML = h.trades.length
-    ? `<table><thead><tr><th>Result</th><th>Closed</th><th>Coin</th><th>Side</th><th>Source</th><th class="r">Entry</th><th class="r">Exit</th><th class="r">Size</th><th class="r">Net P&amp;L</th><th class="r">Net %</th><th>Why it closed</th><th class="r">Held</th></tr></thead><tbody>${h.trades.map((t) => `<tr data-sym="${esc(t.symbol)}">
+    ? `<table><thead><tr><th>Result</th><th>Closed</th><th>Coin</th><th>Side</th><th>Type</th><th class="r">Entry</th><th class="r">Exit</th><th class="r">Size</th><th class="r">Net P&amp;L</th><th class="r">Net %</th><th>Why it closed</th><th class="r">Held</th></tr></thead><tbody>${h.trades.map((t) => `<tr data-sym="${esc(t.symbol)}">
         <td><span class="pill ${t.result}">${t.result === 'win' ? 'WIN' : 'LOSS'}</span></td><td class="muted" title="${esc(new Date(t.closedAt).toLocaleString())}">${ago(t.closedAt)}</td>
-        <td><b>${esc(t.symbol)}</b></td><td><span class="pill ${t.side === 'short' ? 'bad' : 'good'}">${esc(t.side)}</span></td><td class="muted" title="${esc(t.trader || '')}">${esc(sourceLabel(t))}</td>
+        <td><b>${esc(t.symbol)}</b></td><td><span class="pill ${t.side === 'short' ? 'bad' : 'good'}">${esc(t.side)}</span></td><td title="${esc(t.trader || '')}">${typePill(t)}</td>
         <td class="r">${price(t.entry)}</td><td class="r">${price(t.exit)}</td><td class="r">${money(t.notional)}</td>
         <td class="r ${cls(t.pnl)}"><b>${t.pnl >= 0 ? '+' : ''}${money(t.pnl)}</b></td><td class="r ${cls(t.pnl)}">${pct(t.pnlPct)}</td>
         <td class="muted">${esc(reasonLabel[t.reason] || t.reason)}</td><td class="r muted">${held(t.openedAt, t.closedAt)}</td></tr>`).join('')}</tbody></table>`

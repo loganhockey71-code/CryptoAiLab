@@ -179,13 +179,42 @@ export async function start() {
   });
   hl.on('open', (isReconnect) => { syncSubscriptions(); if (isReconnect) catchUp(); });
   traders.onTrackedChange = syncSubscriptions;
+  engine.setSmartMoneyProvider(smartMoneyFor);
   hl.start();
   await new Promise((r) => setTimeout(r, 1500));
   await resyncOpenPositions();
   await startTraders();
   setInterval(syncSubscriptions, 30_000);
+  setInterval(() => refreshSmartMoney().catch((e) => warn('smart money', e.message)), 60_000);
+  setTimeout(() => refreshSmartMoney().catch(() => {}), 20_000);
   setInterval(async () => { if (hl.midAgeMs() > R.staleMs) { try { await hl.refreshMidsRest(); } catch { /* retried next tick */ } } }, 5000);
   log('Copy engine running (paper): mirrors only traders with a verified win rate >= 75%');
+}
+
+/* ------------------------------------------------------------ smart-money view */
+// What the tracked (>=75% win rate) Hyperliquid traders hold right now, by base symbol. The LLM strategy uses this as its "smart money" evidence.
+let smartMap = new Map();
+async function refreshSmartMoney() {
+  const next = new Map();
+  for (const t of [...traders.map.values()].filter((x) => x.tracking)) {
+    try {
+      const st = await getState(t.address, { live: true });
+      for (const p of st.positions) {
+        if (!isPerp(p.coin) || !p.szi) continue;
+        const sym = p.coin.replace(/^k(?=[A-Z])/, '');          // kPEPE -> PEPE
+        const e = next.get(sym) ?? { longs: 0, shorts: 0, preferredLongs: 0, traders: [] };
+        const side = p.szi > 0 ? 'long' : 'short';
+        if (side === 'long') { e.longs++; if (t.tier === 'preferred') e.preferredLongs++; } else e.shorts++;
+        e.traders.push({ address: t.address, side, notional: p.positionValue, winRate: Number(t.win_rate) });
+        next.set(sym, e);
+      }
+    } catch (e) { warn('smart-money refresh', t.address.slice(0, 8), e.message); }
+  }
+  smartMap = next;
+}
+export function smartMoneyFor(symbol) {
+  const e = smartMap.get(symbol);
+  return e ? { ...e, net: e.longs - e.shorts } : null;
 }
 
 /** Dashboard data: Hyperliquid traders and Zerion on-chain wallets together. */

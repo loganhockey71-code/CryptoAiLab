@@ -67,15 +67,40 @@ export function researchScore(sig) {
   };
 }
 
-export function confluence({ snaps, rvol, signal, derivatives, priceUp }) {
+/** Tracked smart-money traders (win rate >= 75%) currently positioned in this coin. Shorts by trusted traders count against a long. */
+export function smartMoneyBonus(sm) {
+  if (!sm || !(sm.longs + sm.shorts)) return { bonus: 0, note: 'no tracked trader holds this coin' };
+  if (sm.net < 0) return { bonus: -10, note: `tracked traders net SHORT (${sm.shorts} short vs ${sm.longs} long)` };
+  if (sm.longs >= 2 || sm.preferredLongs >= 1) return { bonus: 8, note: `${sm.longs} tracked trader(s) long${sm.preferredLongs ? ` (${sm.preferredLongs} at >=80% win rate)` : ''}` };
+  if (sm.longs >= 1) return { bonus: 4, note: '1 tracked trader long' };
+  return { bonus: 0, note: 'tracked traders flat/mixed' };
+}
+
+export function confluence({ snaps, rvol, signal, derivatives, priceUp, smartMoney }) {
   const t = technicalScore(snaps), v = rvolScore(rvol), r = researchScore(signal), d = derivativesScore(derivatives, priceUp);
-  const total = t.score + v.score + r.score + d.score;
+  const sm = smartMoneyBonus(smartMoney);
+  const smartTotal = clamp(d.score + sm.bonus, 0, 25);    // 4th component = smart money: derivatives positioning + tracked-trader alignment
+  const total = t.score + v.score + r.score + smartTotal;
   return {
     total: Math.round(total * 10) / 10,
     technical: Math.round(t.score * 10) / 10, rvol: Math.round(v.score * 10) / 10,
-    research: Math.round(r.score * 10) / 10, derivatives: Math.round(d.score * 10) / 10,
-    notes: { technical: t.missing.length ? `missing timeframes: ${t.missing.join(',')}` : 'all timeframes present', rvol: v.note, research: r.note, derivatives: d.note },
+    research: Math.round(r.score * 10) / 10, derivatives: Math.round(smartTotal * 10) / 10,
+    notes: { technical: t.missing.length ? `missing timeframes: ${t.missing.join(',')}` : 'all timeframes present', rvol: v.note, research: r.note, derivatives: `${d.note}; ${sm.note}` },
   };
+}
+
+/**
+ * Every requirement must pass INDEPENDENTLY (not just the sum): technical, volume, smart money, research.
+ * (Candle confirmation, the 80/100 total and every risk filter are enforced separately.) Returns { fails: [...] }.
+ */
+export function requirements(c, smartMoney) {
+  const F = R.minComponent, fails = [];
+  if (c.technical < F) fails.push(`technical ${c.technical}/25 < ${F}`);
+  if (c.rvol < F) fails.push(`volume (RVOL) ${c.rvol}/25 < ${F}`);
+  if (c.derivatives < F) fails.push(`smart money ${c.derivatives}/25 < ${F}`);
+  if (smartMoney && smartMoney.net < 0) fails.push('tracked smart-money traders are net short');
+  if (c.research < F) fails.push(`research ${c.research}/25 < ${F}`);
+  return { fails, floor: F };
 }
 
 /** Normalise stop into the mandatory 2.5-4% band, then compute net R:R after fees + slippage. */

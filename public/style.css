@@ -25,6 +25,8 @@ body { min-height: 100vh; }
 .chips { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .chip { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; display: flex; flex-direction: column; min-width: 84px; }
 .chip b { font-size: 14px; font-variant-numeric: tabular-nums; } .chip span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.pill.own { color: var(--blue); border-color: rgba(91,157,255,.55); background: rgba(91,157,255,.12); font-weight: 700; }
+.pill.hot { color: #ff9f43; border-color: rgba(255,159,67,.6); background: rgba(255,159,67,.12); font-weight: 700; }
 .pill.win { color: var(--green); border-color: rgba(38,166,154,.6); background: rgba(38,166,154,.12); font-weight: 700; } .pill.loss { color: var(--red); border-color: rgba(239,83,80,.6); background: rgba(239,83,80,.12); font-weight: 700; }
 .copy-panel { grid-area: copy; } #copy { max-height: 380px; }
 .table-panel { grid-area: table; } .chart-panel { grid-area: chart; } .pos-panel { grid-area: pos; } .log-panel { grid-area: log; } .learn-panel { grid-area: learn; }

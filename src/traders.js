@@ -21,12 +21,13 @@ export const traders = {
  */
 export function closingOrders(fills) {
   const groups = new Map();
+  const lastOpen = new Map();   // coin -> time of the most recent opening fill, to measure how long each position was held
   for (const f of fills) {
     if (!isPerp(f.coin)) continue;
     const closing = Number(f.closedPnl) !== 0 || /close|liquidat| > /i.test(f.dir ?? '');
-    if (!closing) continue;
+    if (!closing) { lastOpen.set(f.coin, f.time); continue; }
     const key = `${f.coin}|${f.twapId ?? f.oid}`;
-    const g = groups.get(key) ?? { coin: f.coin, time: f.time, net: 0 };
+    const g = groups.get(key) ?? { coin: f.coin, time: f.time, net: 0, openedAt: lastOpen.get(f.coin) ?? null };
     g.net += Number(f.closedPnl) - Number(f.fee);
     g.time = Math.max(g.time, f.time);
     groups.set(key, g);
@@ -39,6 +40,7 @@ export function summarize(orders, firstFillAt, now = Date.now()) {
   const wins = orders.filter((t) => t.net > 0).length;
   const grossWin = orders.filter((t) => t.net > 0).reduce((a, t) => a + t.net, 0);
   const grossLoss = -orders.filter((t) => t.net <= 0).reduce((a, t) => a + t.net, 0);
+  const holds = orders.filter((o) => o.openedAt != null).map((o) => (o.time - o.openedAt) / 60_000).sort((a, b) => a - b);
   const lastAt = n ? orders[n - 1].time : null;
   const spanDays = lastAt ? Math.max(1, (lastAt - (firstFillAt ?? orders[0].time)) / DAY) : 0;
   return {
@@ -46,6 +48,7 @@ export function summarize(orders, firstFillAt, now = Date.now()) {
     netPnl: orders.reduce((a, t) => a + t.net, 0),
     profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? 99 : 0),
     spanDays, tradesPerDay: spanDays ? n / spanDays : 0,
+    medianHoldMin: holds.length ? holds[Math.floor(holds.length / 2)] : null,
     activeDays: new Set(orders.map((t) => new Date(t.time).toISOString().slice(0, 10))).size,
     maxLoss: n ? Math.min(0, ...orders.map((t) => t.net)) : 0,
     lastCloseAt: lastAt,
@@ -59,7 +62,7 @@ export async function evaluate(address, meta) {
   const rec = {
     address, source: 'hyperliquid', display_name: meta.displayName ?? null, status: 'rejected', tier: null, reject_reason: null,
     win_rate: st.winRate, trades: st.trades, wins: st.wins, net_pnl: st.netPnl, profit_factor: st.profitFactor,
-    avg_hold_minutes: null, trades_per_day: st.tradesPerDay, max_loss: st.maxLoss, window_days: Math.round(st.spanDays),
+    avg_hold_minutes: st.medianHoldMin, trades_per_day: st.tradesPerDay, max_loss: st.maxLoss, window_days: Math.round(st.spanDays),
     lb_month_pnl: meta.monthPnl ?? null, account_value: meta.accountValue ?? null,
     last_fill_at: fills.length ? new Date(fills[fills.length - 1].time).toISOString() : null,
     evaluated_at: new Date(now).toISOString(), updated_at: new Date(now).toISOString(),
@@ -71,6 +74,7 @@ export async function evaluate(address, meta) {
   if (st.trades && st.activeDays < C.minActiveDays) why.push(`traded on only ${st.activeDays} days (need ${C.minActiveDays})`);
   if (!st.lastCloseAt || now - st.lastCloseAt > C.maxLastFillDays * DAY) why.push(`inactive (no closed trade in ${C.maxLastFillDays}d)`);
   if (st.tradesPerDay > C.maxTradesPerDay) why.push(`${st.tradesPerDay.toFixed(0)} closes/day (bot-like, can't be copied)`);
+  if (st.medianHoldMin != null && st.medianHoldMin < C.minMedianHoldMin) why.push(`median hold ${st.medianHoldMin.toFixed(1)}m < ${C.minMedianHoldMin}m (flips too fast to copy without paying fees)`);
   if (st.profitFactor < C.minProfitFactor) why.push(`profit factor ${st.profitFactor.toFixed(2)} < ${C.minProfitFactor}`);
   if (st.netPnl <= 0) why.push('net P&L not positive');
   if (!why.length) {
@@ -130,7 +134,7 @@ async function cycle() {
       d.leaderboardAt = cache.at;
     }
     const staleMs = C.reevalHours * 3600_000;
-    const stale = (a) => { const t = traders.map.get(a); return !t?.evaluated_at || Date.now() - new Date(t.evaluated_at).getTime() > staleMs; };
+    const stale = (a) => { const t = traders.map.get(a); return !t?.evaluated_at || t.avg_hold_minutes == null || Date.now() - new Date(t.evaluated_at).getTime() > staleMs; };
     const queue = [
       ...[...traders.map.values()].filter((t) => t.tracking && stale(t.address)).map((t) => ({ address: t.address, displayName: t.display_name, accountValue: t.account_value, monthPnl: t.lb_month_pnl })),
       ...cache.list.filter((c) => stale(c.address)),

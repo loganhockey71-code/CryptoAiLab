@@ -85,6 +85,8 @@ Reference price: ${ctx.price}
 BTC 1h regime: ${ctx.btcRegime}
 Multi-timeframe technicals (each timeframe: trendUp = EMA20>EMA50 and price>EMA50): ${JSON.stringify(ctx.timeframes)}
 Relative volume (RVOL, last completed 15m vs 20-candle avg): ${ctx.rvol}
+Why this coin is being looked at (trending/unusual activity flags): ${JSON.stringify(ctx.activity)}
+Smart money: positions held right now by tracked traders who each have a verified win rate >= 75%: ${JSON.stringify(ctx.smartMoney)}
 Derivatives (Tier 2, Coinglass): ${JSON.stringify(ctx.derivatives)}
 Macro (Tier 3, FRED): ${JSON.stringify(ctx.macro)}
 Crypto/market legislation (Tier 3, Congress.gov): ${JSON.stringify(ctx.legislation)}
@@ -96,9 +98,10 @@ Data provenance/timestamps: ${JSON.stringify(ctx.provenance)}
 Rules:
 - Several aggregators repeating the same underlying fact count as ONE independent source.
 - If reliable sources materially disagree, lower confidence or return direction "neutral".
+- A trending or unusually active coin is only a reason to LOOK, not to buy. Judge whether the move still has momentum or is exhausted/parabolic; chasing a vertical move is a real risk, so lower confidence (or return neutral) when it looks overextended or has no pullback to build on. Tracked traders holding a coin long is supporting evidence; tracked traders short is a strong reason to avoid it.
 - Political items are market-wide context, not coin-specific evidence. Prefer Tier 3 over Tier 4; treat social-media posts and headlines as unverified. Count them under "macro_gov". If a high-impact event from the last 24 hours (rate decision, tariffs, sanctions, an executive order or SEC/CFTC action touching crypto or markets) makes the setup riskier, lower confidence and say so in key_risks. Never invent a causal link between an event and this coin.
 - target_price and stop_price must be consistent with direction "bullish": stop_price < price < target_price. Stop distance should be between 2.5% and 4% below price.
-- "supporting_sources" and "conflicting_sources" must only contain values from: "exchange_technicals", "derivatives", "macro_gov", "news_onchain".
+- "supporting_sources" and "conflicting_sources" must only contain values from: "exchange_technicals", "derivatives", "macro_gov", "news_onchain", "smart_money".
 
 ${lessonsBlock(lessons)}
 
@@ -114,7 +117,7 @@ Return JSON with exactly these keys:
     warn(`invalid LLM signal for ${ctx.symbol}`);
     return null;
   }
-  const valid = new Set(['exchange_technicals', 'derivatives', 'macro_gov', 'news_onchain']);
+  const valid = new Set(['exchange_technicals', 'derivatives', 'macro_gov', 'news_onchain', 'smart_money']);
   const clean = (a) => [...new Set((Array.isArray(a) ? a : []).filter((x) => valid.has(x)))];
   return {
     provider: out.provider, direction, confidence: Math.max(0, Math.min(100, confidence)),
