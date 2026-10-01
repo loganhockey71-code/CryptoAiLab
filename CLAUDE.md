@@ -21,7 +21,7 @@ Save this content as `CLAUDE.md` in the root folder of your project (alongside `
 - Default State: 100% Cash (Long-only for v1).
 - Entry Confirmation: Candle confirmation required before entering any setup.
 - Position Limits: Max 25%–30% portfolio equity per trade ($500–$600); max 3 active positions.
-- Risk & Exit: Mandatory risk stop-loss (-2.5% to -4%). Dynamic trailing profit mechanism. BTC 1h regime must be bullish. Min R:R ratio >= 2.5:1. Confluence score >= 80/100.
+- Risk & Exit: Mandatory risk stop-loss by coin: BTC 1.5-2.0%, ETH 2.0-2.5%, Top 20 2.5-3.0%, Top 21-50 3-6%, Top 51-100 6-10%, memes 10% max. A wider stop is allowed only on very high conviction (confidence >= 85) and NEVER beyond the 15% absolute maximum. Dynamic trailing profit mechanism. BTC 1h regime must be bullish. Min R:R ratio >= 2.5:1. Confluence score >= 80/100.
 - Circuit Breakers: -5% daily equity loss halts trading for the day. 3 consecutive loss days freeze execution until manual review. 3 single-day losses or 2 losses in 60 mins force a 3-hour freeze. 2-hour lockout on stop-loss hits.
 - Execution Realism: Subtract 0.10% fee and 0.05% slippage per trade.
 
@@ -38,7 +38,7 @@ Save this content as `CLAUDE.md` in the root folder of your project (alongside `
 - Win-rate floor is HARD: only traders with a verified win rate >= 75% are ever tracked; >= 80% ranks first. A "trade" is one closing order (fills grouped by order/TWAP id) net of fees.
 - Extra qualification (protects against inflated win rates): >= 30 closed trades, >= 7 days of history on >= 5 active days, profit factor >= 1.5, positive net P&L, not bot-like (<= 40 closes/day), active in the last 14 days, account >= $10k, open positions not underwater by more than 10% of the account.
 - Mirroring: entries, adds, partial exits, full exits and flips follow the leader. Size = leader's % of their account applied to our equity, capped at 30%. Skip if our price is more than 1% worse than the leader's fill, or the fill is more than 120s old (exits are never skipped for age).
-- Applies to copies: circuit breakers, shared max 3 open positions, 30% size cap, fresh-data check (10s), fees + slippage, 2h asset cooldown after a stop, hard 4% protective stop, post-mortem after every trade. Shorts are allowed for copied trades (paper, 1x, no leverage). The BTC-regime / confluence / R:R filters apply to the LLM strategy only.
+- Applies to copies: circuit breakers, shared max 3 open positions, 30% size cap, fresh-data check (10s), fees + slippage, 2h asset cooldown after a stop, hard 4% protective stop (may be set wider for a specific trade, absolute maximum 7%), post-mortem after every trade. Shorts are allowed for copied trades (paper, 1x, no leverage). The BTC-regime / confluence / R:R filters apply to the LLM strategy only.
 
 ## Per-Trader Loss-Streak Ladder (all copy sources)
 Counts consecutive losing copies of the SAME trader; any win resets it. Exits/mirrored closes are never blocked, only new entries and adds.

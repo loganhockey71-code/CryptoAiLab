@@ -289,7 +289,7 @@ async function evaluateCoinInner(cs, trigger, ctxSources, lessons, stats) {
   const tfSummary = Object.fromEntries(Object.entries(cs.snaps).map(([k, v]) => [k, v && { trendUp: v.trendUp, rsi: v.rsi && +v.rsi.toFixed(1), macdHist: v.macdHist, ema20: v.ema20, ema50: v.ema50 }]));
   const act = activity(cs);
   const sig = await generateSignal({
-    symbol: cs.symbol, name: cs.coin.name, price: fp.price, btcRegime: state.btc.regime, timeframes: tfSummary, rvol: cs.rvol,
+    symbol: cs.symbol, name: cs.coin.name, stopBand: riskLib.stopBand(cs.symbol, cs.coin.rank), price: fp.price, btcRegime: state.btc.regime, timeframes: tfSummary, rvol: cs.rvol,
     derivatives: deriv.data, macro: ctxSources.macro.data, legislation: ctxSources.bills.data, onchain: ctxSources.onchain.data, politics: compactPolitics(ctxSources.politics),
     news: cs.sentiment ? { coin: cs.sentiment, market: (ctxSources.news.data || []).slice(0, 8) } : { market: (ctxSources.news.data || []).slice(0, 8) },
     activity: { whySelected: trigger.kind === 'mover' ? 'unusually active / trending' : 'regular scan', flags: act.reasons, change1h: pct(act.h1), change24h: act.h24 == null ? null : pct(act.h24) },
@@ -430,7 +430,7 @@ async function tryEnter(p, confirmation) {
     let btc = state.btc;
     try { btc = riskLib.btcRegime(snapshot(await fetchCandles('BTC-USD', 3600))); state.btc = { ...btc, at: Date.now() }; } catch { /* keep scan regime */ }
     const live = fp.price ?? p.refPrice;
-    const shaped = riskLib.shapeTrade(live, p.sig.stop, p.sig.target);
+    const shaped = riskLib.shapeTrade(live, p.sig.stop, p.sig.target, { symbol: p.symbol, rank: cs?.coin?.rank ?? 100, confidence: p.sig.confidence });
     const reasons = riskLib.entryFilters({
       signal: p.sig, entry: live, shaped, score: p.conf.total, btc, portfolio: state.portfolio,
       openCount: state.positions.size, cooldownUntil: cs?.coin?.cooldownUntil, dataFresh: fp.price != null,
@@ -673,7 +673,8 @@ export async function openCopyPosition(o) {
   if (notional < config.copy.minNotional) return { ok: false, reason: `position would be only $${notional.toFixed(2)} (below $${config.copy.minNotional} minimum / insufficient cash)` };
   const entryPx = entryFillFor(o.side, o.price);
   const qty = notional / entryPx, fee = riskLib.feeOn(notional);
-  const stop = o.side === 'short' ? entryPx * (1 + config.copy.stopPct) : entryPx * (1 - config.copy.stopPct);
+  const stopPct = Math.min(o.stopPct ?? config.copy.stopPct, config.copy.stopMaxPct);   // 4% by default; a wider stop is allowed but never beyond 7%
+  const stop = o.side === 'short' ? entryPx * (1 + stopPct) : entryPx * (1 - stopPct);
   const why = `Mirroring ${o.trader.slice(0, 10)}… (${(o.winRate * 100).toFixed(0)}% win rate, ${o.tier}): they ${(o.venue ?? 'hl') === 'hl' ? `went ${o.side}` : 'bought'} ${o.symbol ?? o.coin} at ${o.leaderPx}; we filled at ${entryPx.toPrecision(6)} (${((entryPx / o.leaderPx - 1) * 100).toFixed(2)}% vs theirs, ${((now - o.leaderTime) / 1000).toFixed(1)}s later).`;
   const row = await db.insertTrade({
     symbol: o.symbol ?? o.coin, signal_id: o.signalId ?? null, status: 'open', side: o.side, entry_price: entryPx, qty, notional, target_price: null, stop_price: stop,
@@ -686,7 +687,7 @@ export async function openCopyPosition(o) {
   p.cash -= notional + fee;
   const pos = {
     id, venue: o.venue ?? 'hl', coin: o.coin, symbol: o.symbol ?? o.coin, extra: o.extra ?? null, side: o.side, qty, entry: entryPx, notional, fee, initCost: notional + fee, realized: 0,
-    stop, target: null, trailing: null, highWater: entryPx, openedAt: now, rationale: why, lastPrice: o.price, leaderSize: o.leaderSize,
+    stop, target: null, trailing: null, highWater: entryPx, openedAt: now, rationale: why, lastPrice: o.price, leaderSize: o.leaderSize, stopPct,
     copy: { trader: o.trader, winRate: o.winRate, tier: o.tier, leaderPx: o.leaderPx, leaderTime: o.leaderTime, k: o.k, latencyMs: now - o.leaderTime },
     ctx: { conf: { notes: {}, technical: 0, rvol: 0, research: 0, derivatives: 0, total: 0 }, sig: { evidenceSummary: why, supporting: [], conflicting: [], confidence: o.winRate * 100 }, patterns: {}, btc: state.btc.regime },
   };
@@ -712,7 +713,8 @@ export async function addToCopyPosition(pos, addNotional, price, priceAgeMs = 0)
   p.cash -= add + fee;
   pos.entry = (pos.qty * pos.entry + q * px) / (pos.qty + q);
   pos.qty += q; pos.notional += add; pos.fee += fee; pos.initCost += add + fee;
-  pos.stop = pos.side === 'short' ? pos.entry * (1 + config.copy.stopPct) : pos.entry * (1 - config.copy.stopPct);
+  const sp = pos.stopPct ?? config.copy.stopPct;
+  pos.stop = pos.side === 'short' ? pos.entry * (1 + sp) : pos.entry * (1 - sp);
   await db.updateTrade(pos.id, { qty: pos.qty, notional: pos.notional, entry_price: pos.entry, fee_entry: pos.fee, stop_price: pos.stop });
   logDecision('entered', pos.symbol, `added $${add.toFixed(0)} to the copied ${pos.side} (leader added); new avg entry ${pos.entry.toPrecision(6)}`);
   persistPortfolio(true);

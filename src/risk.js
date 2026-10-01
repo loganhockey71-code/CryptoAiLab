@@ -103,15 +103,27 @@ export function requirements(c, smartMoney) {
   return { fails, floor: F };
 }
 
-/** Normalise stop into the mandatory 2.5-4% band, then compute net R:R after fees + slippage. */
-export function shapeTrade(entry, llmStop, llmTarget) {
-  const rawDist = llmStop != null && llmStop < entry ? (entry - llmStop) / entry : R.stopMaxPct;
-  const stopDist = clamp(rawDist, R.stopMinPct, R.stopMaxPct);
+/** Stop band [min, max] for a coin: BTC 1.5-2%, ETH 2-2.5%, Top 20 2.5-3%, Top 21-50 3-6%, Top 51-100 6-10%, memes 6-10%. */
+export function stopBand(symbol, rank) {
+  const B = R.stopBands;
+  const tier = R.memeSymbols.includes(symbol) ? 'meme' : symbol === 'BTC' ? 'btc' : symbol === 'ETH' ? 'eth' : rank <= 20 ? 'top20' : rank <= 50 ? 'mid' : 'small';
+  return { tier, min: B[tier][0], max: B[tier][1], absMax: R.stopAbsMaxPct };
+}
+
+/**
+ * Normalise the stop into the coin's band, then compute net R:R after fees + slippage. A stop wider than the band is only kept when the
+ * signal's confidence >= stopOverrideConfidence (and memes never exceed 10%); nothing is ever wider than the 15% absolute maximum.
+ */
+export function shapeTrade(entry, llmStop, llmTarget, { symbol, rank, confidence = 0 } = {}) {
+  const band = stopBand(symbol, rank);
+  const rawDist = llmStop != null && llmStop < entry ? (entry - llmStop) / entry : band.max;
+  const ceiling = band.tier === 'meme' ? band.max : confidence >= R.stopOverrideConfidence ? band.absMax : band.max;
+  const stopDist = clamp(rawDist, band.min, ceiling);
   const stop = entry * (1 - stopDist);
   const target = llmTarget;
   const reward = target - entry - ROUND_TRIP_COST_PCT * entry;
   const risk = entry - stop + ROUND_TRIP_COST_PCT * entry;
-  return { stop, target, stopDist, rr: reward > 0 ? reward / risk : 0, grossRr: (target - entry) / (entry - stop) };
+  return { stop, target, stopDist, band, rr: reward > 0 ? reward / risk : 0, grossRr: (target - entry) / (entry - stop) };
 }
 
 export function positionSize({ equity, cash, score }) {
