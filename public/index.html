@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crypto AI Lab · Paper Trading</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">Crypto AI Lab <span class="badge paper">PAPER ONLY</span></div>
+  <div class="stats" id="stats"></div>
+</header>
+<div id="banner" class="banner hidden"></div>
+
+<main class="grid">
+  <section class="panel table-panel">
+    <div class="panel-head">
+      <h2>Top 100 <small id="universe-note"></small></h2>
+      <input id="filter" type="search" placeholder="Filter coin…" autocomplete="off">
+    </div>
+    <div class="scroll table-scroll">
+      <table id="coins">
+        <thead><tr>
+          <th>#</th><th>Coin</th><th class="r">Price</th><th>1m candle</th><th>Signal</th><th class="r">Score</th>
+          <th>BTC gate</th><th class="r">RVOL</th><th class="r">Funding</th><th class="r">News</th><th>Data</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel chart-panel">
+    <div class="panel-head"><h2>Chart · <span id="chart-symbol">BTC</span> <small>1m</small></h2><span class="muted" id="chart-note"></span></div>
+    <div id="chart"></div>
+  </section>
+
+  <section class="panel pos-panel">
+    <div class="panel-head"><h2>Execution &amp; Positions</h2></div>
+    <div class="scroll" id="positions"></div>
+  </section>
+
+  <section class="panel log-panel">
+    <div class="panel-head"><h2>Decision Log <small>why it did / didn't enter</small></h2></div>
+    <div class="scroll" id="decisions"></div>
+  </section>
+
+  <section class="panel learn-panel">
+    <div class="panel-head"><h2>AI Learning Feed <small>post-mortems</small></h2></div>
+    <div class="scroll" id="reflections"></div>
+  </section>
+</main>
+<script src="/vendor/lightweight-charts.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

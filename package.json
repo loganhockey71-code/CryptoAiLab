@@ -1,0 +1,21 @@
+{
+  "name": "crypto-ai-lab",
+  "version": "1.0.0",
+  "description": "Local paper-trading lab",
+  "main": "src/server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node src/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.117.2",
+    "dotenv": "^18.0.5",
+    "express": "^5.2.1",
+    "lightweight-charts": "^4.2.3",
+    "ws": "^8.22.0"
+  }
+}
