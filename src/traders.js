@@ -1,6 +1,7 @@
 // Finds and scores Hyperliquid traders. Only traders with a verified win rate >= 75% (preferring >= 80%) are ever tracked.
 import { config, log, warn } from './config.js';
 import { db } from './db.js';
+import * as engine from './engine.js';
 import { fetchLeaderboard, fetchFills, getState, isPerp } from './hyperliquid.js';
 
 const C = config.copy;
@@ -92,7 +93,7 @@ export async function evaluate(address, meta) {
 
 /** Best qualified traders become the live-tracked set (preferred >= 80% first, then win rate, then profit factor). */
 export function select() {
-  const q = [...traders.map.values()].filter((t) => t.status === 'qualified' && Number(t.win_rate) >= C.minWinRate)
+  const q = [...traders.map.values()].filter((t) => t.status === 'qualified' && Number(t.win_rate) >= C.minWinRate && !engine.traderStatus(t.address).excluded)
     .sort((a, b) => (b.tier === 'preferred') - (a.tier === 'preferred') || b.win_rate - a.win_rate || b.profit_factor - a.profit_factor)
     .slice(0, C.maxTracked);
   const chosen = new Set(q.map((t) => t.address));
@@ -134,7 +135,7 @@ async function cycle() {
       d.leaderboardAt = cache.at;
     }
     const staleMs = C.reevalHours * 3600_000;
-    const stale = (a) => { const t = traders.map.get(a); return !t?.evaluated_at || t.avg_hold_minutes == null || Date.now() - new Date(t.evaluated_at).getTime() > staleMs; };
+    const stale = (a) => { const t = traders.map.get(a); return engine.state.rescore.has(a) || !t?.evaluated_at || t.avg_hold_minutes == null || Date.now() - new Date(t.evaluated_at).getTime() > staleMs; };
     const queue = [
       ...[...traders.map.values()].filter((t) => t.tracking && stale(t.address)).map((t) => ({ address: t.address, displayName: t.display_name, accountValue: t.account_value, monthPnl: t.lb_month_pnl })),
       ...cache.list.filter((c) => stale(c.address)),
@@ -146,6 +147,7 @@ async function cycle() {
         const prev = traders.map.get(cand.address);
         rec.tracking = prev?.tracking ?? false;
         traders.map.set(cand.address, rec);
+        engine.state.rescore.delete(cand.address);
         await db.upsertTraders([rec]);
       } catch (e) { warn('trader evaluation', cand.address.slice(0, 8), e.message); await sleep(3000); }
       d.evaluated++;

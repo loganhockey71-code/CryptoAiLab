@@ -40,6 +40,12 @@ Save this content as `CLAUDE.md` in the root folder of your project (alongside `
 - Mirroring: entries, adds, partial exits, full exits and flips follow the leader. Size = leader's % of their account applied to our equity, capped at 30%. Skip if our price is more than 1% worse than the leader's fill, or the fill is more than 120s old (exits are never skipped for age).
 - Applies to copies: circuit breakers, shared max 3 open positions, 30% size cap, fresh-data check (10s), fees + slippage, 2h asset cooldown after a stop, hard 4% protective stop, post-mortem after every trade. Shorts are allowed for copied trades (paper, 1x, no leverage). The BTC-regime / confluence / R:R filters apply to the LLM strategy only.
 
+## Per-Trader Loss-Streak Ladder (all copy sources)
+Counts consecutive losing copies of the SAME trader; any win resets it. Exits/mirrored closes are never blocked, only new entries and adds.
+- 1 loss: keep copying. 2 in a row: pause that trader 3h (range 2-4h). 3 in a row: pause 24h and re-score the trader (must still qualify). 4 in a row: stop copying until manual review. 5+: removed from the active pool (same manual release needed).
+- Derived from closed trades in Supabase, so it survives restarts. Operator release: dashboard "release" button (`POST /api/traders/release`), which clears the streak and forces a re-score.
+- Thresholds live in `config.copy.loserStreak`; it is a risk rule, so self-learning must never change it.
+
 ## On-chain Copy Trading (Zerion, paper only)
 - Discovery: GeckoTerminal trending pools on eth/base/arbitrum/bsc/solana -> wallets trading them (plus any in `ZERION_WATCH_WALLETS`). Scoring + live detection: Zerion decoded swaps. Prices/liquidity: DexScreener.
 - A "trade" is one SELL of a non-stable, non-major token whose purchase was seen in the window (average-cost USD P&L net of gas). Sells without a known basis (airdrops, pre-window buys) are ignored, never counted as wins.

@@ -223,7 +223,7 @@ export function snapshot() {
   const row = (t) => ({
     source: 'hyperliquid', address: t.address, name: t.display_name, status: t.status, tier: t.tier, tracking: !!t.tracking, winRate: Number(t.win_rate), trades: t.trades,
     profitFactor: Number(t.profit_factor), netPnl: Number(t.net_pnl), perDay: Number(t.trades_per_day), days: t.window_days, accountValue: Number(t.account_value),
-    unrealized: t.unrealized_pnl != null ? Number(t.unrealized_pnl) : null, lastFillAt: t.last_fill_at, reason: t.reject_reason, chains: ['hyperliquid'],
+    unrealized: t.unrealized_pnl != null ? Number(t.unrealized_pnl) : null, lastFillAt: t.last_fill_at, reason: t.reject_reason, chains: ['hyperliquid'], streak: engine.traderStatus(t.address),
     holding: [...engine.state.positions.values()].filter((p) => p.venue === 'hl' && p.copy?.trader === t.address).map((p) => `${p.side} ${p.coin}`),
   });
   const byWin = (a, b) => b.winRate - a.winRate;
@@ -240,7 +240,7 @@ export function snapshot() {
       hyperliquid: { counts: hlCounts, discovery: traders.discovery, connected: hl.connected, midAgeMs: Number.isFinite(hl.midAgeMs()) ? hl.midAgeMs() : null },
       zerion: { enabled: oc.enabled, status: oc.status, counts: oc.counts, discovery: oc.discovery, birdeye: oc.birdeye },
     },
-    rules: { minWinRate: C.minWinRate, preferredWinRate: C.preferredWinRate, minTrades: C.minTrades, windowDays: C.windowDays, stopPct: C.stopPct, maxChasePct: C.maxChasePct },
+    rules: { minWinRate: C.minWinRate, preferredWinRate: C.preferredWinRate, minTrades: C.minTrades, windowDays: C.windowDays, stopPct: C.stopPct, maxChasePct: C.maxChasePct, loserStreak: C.loserStreak },
   };
 }
 

@@ -173,7 +173,14 @@ function renderCopy(c) {
     `Hyperliquid: ${hlS.connected ? 'live' : 'offline'}, ${phase(hlS.discovery)} · Zerion: ${zr.enabled ? phase(zr.discovery) : 'OFF (no API key)'}` +
     (zr.birdeye ? ` · Birdeye: ${zr.birdeye.status}${zr.birdeye.lastAt ? ` (${zr.birdeye.lastFound} wallets, ${zr.birdeye.callsToday}/${zr.birdeye.cap} calls today)` : ''}` : '');
   const short = (a) => a.slice(0, 6) + '…' + a.slice(-4);
-  const badge = (t) => t.tracking ? `<span class="pill good">tracking${t.tier === 'preferred' ? ' · ≥80%' : ' · ≥75%'}</span>` : t.status === 'qualified' ? '<span class="pill amber">qualified (bench)</span>' : '<span class="pill bad">rejected</span>';
+  const streakPill = (t) => {
+    const s = t.streak;
+    if (!s || !s.losses) return '';
+    const cls2 = s.state === 'ok' ? 'amber' : 'bad';
+    const rel = s.state === 'review' || s.state === 'removed' ? ` <button data-release="${esc(t.address)}">release</button>` : '';
+    return `<br><span class="pill ${cls2}" title="${esc(s.label)}">${s.state === 'removed' ? 'removed' : s.state === 'review' ? 'review needed' : s.state === 'paused' ? 'paused' : s.losses + ' loss'}</span>${rel}`;
+  };
+  const badge = (t) => (t.tracking ?`<span class="pill good">tracking${t.tier === 'preferred' ? ' · ≥80%' : ' · ≥75%'}</span>` : t.status === 'qualified' ? '<span class="pill amber">qualified (bench)</span>' : '<span class="pill bad">rejected</span>') + streakPill(t);
   const src = (t) => t.source === 'zerion' ? `<span class="pill" title="${esc((t.chains || []).join(', '))}">on-chain</span>` : '<span class="pill">Hyperliquid</span>';
   const rows = c.traders.map((t) => `<tr>
     <td>${src(t)}</td>
@@ -195,6 +202,13 @@ function render(s) {
   latest = s;
   renderStats(s); renderTable(s); renderPositions(s); renderHistory(s.history); renderNews(s.newsFeed); renderCopy(s.copy); renderDecisions(s); renderReflections(s);
 }
+
+$('#copy').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-release]');
+  if (b && confirm('Release this trader after your review? Their loss streak is cleared and they are re-scored before any new copy.')) {
+    await fetch('/api/traders/release', { method: 'POST', headers: { 'x-requested-with': 'dashboard', 'content-type': 'application/json' }, body: JSON.stringify({ address: b.dataset.release }) });
+  }
+});
 
 $('#positions').addEventListener('click', (e) => {
   const it = e.target.closest('[data-sym]');

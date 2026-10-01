@@ -152,7 +152,7 @@ export async function evaluate(address) {
 }
 
 export function select() {
-  const q = [...wallets.map.values()].filter((t) => t.status === 'qualified' && Number(t.win_rate) >= C.minWinRate)
+  const q = [...wallets.map.values()].filter((t) => t.status === 'qualified' && Number(t.win_rate) >= C.minWinRate && !engine.traderStatus(t.address).excluded)
     .sort((a, b) => (b.tier === 'preferred') - (a.tier === 'preferred') || b.win_rate - a.win_rate || b.profit_factor - a.profit_factor)
     .slice(0, C.maxTracked);
   const chosen = new Set(q.map((t) => t.address));
@@ -175,7 +175,7 @@ async function cycle() {
     d.phase = 'discovering wallets';
     const candidates = await discoverCandidates();
     const staleMs = C.reevalHours * 3600_000;
-    const stale = (a) => { const t = wallets.map.get(a); return !t?.evaluated_at || Date.now() - new Date(t.evaluated_at).getTime() > staleMs; };
+    const stale = (a) => { const t = wallets.map.get(a); return engine.state.rescore.has(a) || !t?.evaluated_at || Date.now() - new Date(t.evaluated_at).getTime() > staleMs; };
     const queue = [...[...wallets.map.values()].filter((t) => t.tracking && stale(t.address)).map((t) => t.address), ...candidates.filter(stale)];
     d.phase = 'evaluating wallets'; d.total = queue.length; d.evaluated = 0; d.scorable = 0; d.startedAt = Date.now();
     for (const address of queue) {
@@ -184,6 +184,7 @@ async function cycle() {
         if (rec.trades >= C.minTrades) d.scorable = (d.scorable ?? 0) + 1;
         rec.tracking = wallets.map.get(address)?.tracking ?? false;
         wallets.map.set(address, rec);
+        engine.state.rescore.delete(address);
         await db.upsertTraders([rec]);
       } catch (e) {
         warn('wallet evaluation', address.slice(0, 8), e.message);
@@ -372,7 +373,7 @@ export function snapshot() {
   const row = (t) => ({
     source: 'zerion', address: t.address, name: null, status: t.status, tier: t.tier, tracking: !!t.tracking, winRate: Number(t.win_rate), trades: t.trades,
     profitFactor: Number(t.profit_factor), netPnl: Number(t.net_pnl), perDay: Number(t.trades_per_day), days: t.window_days, accountValue: Number(t.portfolio_value ?? t.account_value),
-    unrealized: t.unrealized_pnl != null ? Number(t.unrealized_pnl) : null, lastFillAt: t.last_fill_at, reason: t.reject_reason, chains: t.chains ?? [],
+    unrealized: t.unrealized_pnl != null ? Number(t.unrealized_pnl) : null, lastFillAt: t.last_fill_at, reason: t.reject_reason, chains: t.chains ?? [], streak: engine.traderStatus(t.address),
     holding: [...engine.state.positions.values()].filter((p) => p.venue === 'onchain' && p.copy?.trader === t.address).map((p) => `long ${p.symbol}`),
   });
   return {

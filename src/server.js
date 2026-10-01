@@ -80,6 +80,15 @@ app.post('/api/manual-review/clear', (req, res) => {
   res.json({ ok: true });
 });
 
+// Human-only: release a trader that was stopped (4 losses) or removed (5+) after reviewing them. They are re-scored before any new copy.
+app.post('/api/traders/release', (req, res) => {
+  if (req.get('x-requested-with') !== 'dashboard') return res.status(400).json({ error: 'bad request' });
+  const address = String(req.body?.address ?? '');
+  if (!/^[A-Za-z0-9]{20,70}$/.test(address)) return res.status(400).json({ error: 'bad address' });
+  engine.releaseTrader(address);
+  res.json({ ok: true });
+});
+
 const server = app.listen(config.port, '127.0.0.1', () => {
   log(`Dashboard: http://localhost:${config.port}  (PAPER_TRADING=true, paper capital $${config.risk.startingCapital})`);
   engine.start().then(() => copy.start()).then(() => onchain.start()).catch((e) => { warn('engine failed to start:', e); });

@@ -72,6 +72,8 @@ export const config = {
     maxUnrealizedLossPct: 0.10, minAccountValue: 10_000, maxLastFillDays: 14,
     maxTracked: 7, maxCopyPositions: 2,           // copies may use 2 of the 3 position slots; one stays free for my own analysis candidatePool: 200, reevalHours: 12,
     maxChasePct: 0.01, stopPct: 0.04, maxFillAgeMs: 120_000, minNotional: 10,
+    // Consecutive losing copies of the SAME trader (a win resets it): 1 keep copying, 2 pause, 3 long pause + re-score, 4 review, 5+ removed.
+    loserStreak: Object.freeze({ pause2Hours: 3, pause3Hours: 24, reviewAt: 4, removeAt: 5 }),
   }),
   // On-chain (Zerion) copy trading. Same win-rate rules as Hyperliquid (see config.copy); these are the on-chain specifics.
   zerion: Object.freeze({

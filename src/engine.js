@@ -31,6 +31,7 @@ export const state = {
   newsFeed: { at: null, feeds: [], items: [] },   // everything the app read this scan (News & Politics panel)
   freezeKeys: new Set(),       // breaker events that have already caused a freeze (so one event can never re-freeze)
   copyCooldown: new Map(),     // coin -> until (2h lockout after a copied position hits its stop)
+  rescore: new Set(),          // trader addresses whose win rate must be re-evaluated now (3rd straight loss, or manual release)
   scan: { running: false, startedAt: null, finishedAt: null, count: 0, lastError: null, progress: '' },
   sources: {},                 // name -> { tier, ok, fetchedAt, error }
   productSet: new Set(),
@@ -573,6 +574,7 @@ export async function closePosition(pos, price, reason) {
   };
   state.closedToday.push({ ...trade, exitAt: Date.now() });
   recordHistory(pos, trade, pos.initCost ?? (pos.notional + pos.fee));
+  if (pos.copy) noteTraderResult(pos.copy.trader);
   await db.updateTrade(pos.id, {
     status: 'closed', exit_time: trade.exit_time, exit_price: exitPx, exit_reason: reason, fee_exit: feeExit, realized_partial: pos.realized ?? 0,
     gross_pnl: gross, final_pnl: finalPnl, final_pnl_pct: finalPct, actual_result: actual, high_water: pos.highWater, trailing_stop: pos.trailing,
@@ -589,6 +591,45 @@ export async function closePosition(pos, price, reason) {
   checkBreakers();
   persistPortfolio(true);
   reflect(pos, trade, actual).catch((e) => warn('reflection failed', e.message));
+}
+
+/* ------------------------------------------------------- per-trader loss streaks */
+// Consecutive LOSING copies of the same trader escalate: 1 keep copying · 2 pause 3h · 3 pause 24h + re-score · 4 stop until review · 5+ removed.
+// Derived from closed copy trades (restored from Supabase on start), so it survives restarts. Any win resets it. Exits are never blocked.
+const releasedAt = new Map();    // address -> time an operator released the trader (only losses after this count)
+
+export function traderStatus(address, now = Date.now()) {
+  const L = config.copy.loserStreak;
+  const since = releasedAt.get(address) ?? 0;
+  let losses = 0, last = null;
+  for (const t of state.recentClosed) {                         // newest first
+    if (t.trader !== address || t.closedAt <= since) continue;
+    if (t.pnl > 0) break;
+    losses++; last ??= t.closedAt;
+  }
+  const out = { losses, state: 'ok', blocked: false, excluded: false, until: null, label: losses ? `${losses} loss in a row` : 'no loss streak' };
+  if (losses >= L.removeAt) return { ...out, state: 'removed', blocked: true, excluded: true, label: `${losses} losses in a row: removed from the active pool` };
+  if (losses >= L.reviewAt) return { ...out, state: 'review', blocked: true, excluded: true, label: `${losses} losses in a row: not copied until manual review` };
+  if (losses >= 2) {
+    const until = last + (losses >= 3 ? L.pause3Hours : L.pause2Hours) * 3600_000;
+    const paused = until > now;
+    return { ...out, state: paused ? 'paused' : 'ok', blocked: paused, until: paused ? until : null,
+      label: paused ? `${losses} losses in a row: paused until ${new Date(until).toISOString().slice(11, 16)} UTC${losses >= 3 ? ' (re-scoring)' : ''}` : `${losses} losses in a row (pause over, next loss escalates)` };
+  }
+  return out;
+}
+
+function noteTraderResult(address) {
+  const s = traderStatus(address);
+  if (!s.losses) return;
+  if (s.losses === 3) state.rescore.add(address);
+  logDecision(s.blocked ? 'skipped' : 'info', '*', `copy trader ${address.slice(0, 8)}: ${s.label}`);
+}
+
+export function releaseTrader(address) {
+  releasedAt.set(address, Date.now());
+  state.rescore.add(address);
+  logDecision('info', '*', `trader ${address.slice(0, 8)} released by the operator: loss streak cleared, re-scoring before any new copy`);
 }
 
 /** Partial exit (a copied leader scaled out). The remainder stays open; P&L is realised pro-rata. */
@@ -618,6 +659,8 @@ export async function openCopyPosition(o) {
   const p = state.portfolio, now = Date.now();
   const gate = riskLib.tradingGate(p, now);
   if (!gate.allowed) return { ok: false, reason: `circuit breaker: ${gate.reason}` };
+  const tg = traderStatus(o.trader, now);
+  if (tg.blocked) return { ok: false, reason: `trader ${tg.label}` };
   if (state.positions.size + state.pending.size >= R.maxOpenPositions) return { ok: false, reason: `already ${state.positions.size + state.pending.size} open positions/pending signals (max ${R.maxOpenPositions})` };
   if ([...state.positions.values()].filter((x) => x.copy).length >= config.copy.maxCopyPositions) return { ok: false, reason: `copy trades are limited to ${config.copy.maxCopyPositions} of ${R.maxOpenPositions} slots so one stays free for my own analysis` };
   if ([...state.positions.values()].some((x) => x.venue === (o.venue ?? 'hl') && x.coin === o.coin)) return { ok: false, reason: `already copying a ${o.coin} position` };
@@ -658,6 +701,8 @@ export async function addToCopyPosition(pos, addNotional, price, priceAgeMs = 0)
   const p = state.portfolio;
   const gate = riskLib.tradingGate(p);
   if (!gate.allowed) return { ok: false, reason: `circuit breaker: ${gate.reason}` };
+  const tg = traderStatus(pos.copy.trader);
+  if (tg.blocked) return { ok: false, reason: `trader ${tg.label}` };
   if (pos.venue === 'hl' ? hl.midAgeMs() > R.staleMs : !(priceAgeMs <= R.staleMs)) return { ok: false, reason: 'price not verified fresh (>10s)' };
   const equity = markEquity();
   let add = Math.min(addNotional, R.maxPositionPct * equity - pos.notional);
@@ -823,6 +868,11 @@ export async function start() {
   ]);
   state.recentClosed = (recent ?? []).filter((t) => t.status === 'closed' && t.exit_time).map(historyFromDb).sort((a, b) => b.closedAt - a.closedAt).slice(0, 200);
   state.reflections = reflections ?? [];
+  for (const a of new Set(state.recentClosed.map((t) => t.trader).filter(Boolean))) {
+    const s = traderStatus(a);
+    if (s.losses >= 3) state.rescore.add(a);
+    if (s.blocked) logDecision('info', '*', `copy trader ${a.slice(0, 8)}: ${s.label}`);
+  }
   for (const s of (signals ?? []).slice().reverse()) {
     if (s.status === 'skipped' || s.status === 'confirmation_failed') state.decisions.unshift({ at: new Date(s.created_at).getTime(), type: 'skipped', symbol: s.symbol, message: s.skip_reason ?? s.status });
   }
