@@ -32,11 +32,13 @@ export const config = {
     etherscan: env('ETHERSCAN_API_KEY'),
     congress: env('CONGRESS_KEY'),
     fred: env('FRED_API_KEY'),
+    zerion: env('ZERION_API_KEY'),
+    watchWallets: (env('ZERION_WATCH_WALLETS') || '').split(',').map((a) => a.trim()).filter(Boolean),
   },
   models: {
     // tried in order; one congested or retired model must not take the Research Brain offline
     gemini: ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-flash-latest'],
-    openrouter: 'google/gemini-3.5-flash',
+    openrouter: env('OPENROUTER_MODEL') || 'google/gemini-3.5-flash',
   },
   // Deterministic risk constants. The self-learning system must never write to these.
   risk: Object.freeze({
@@ -68,6 +70,13 @@ export const config = {
     maxUnrealizedLossPct: 0.10, minAccountValue: 10_000, maxLastFillDays: 14,
     maxTracked: 7, candidatePool: 200, reevalHours: 12,
     maxChasePct: 0.01, stopPct: 0.04, maxFillAgeMs: 120_000, minNotional: 10,
+  }),
+  // On-chain (Zerion) copy trading. Same win-rate rules as Hyperliquid (see config.copy); these are the on-chain specifics.
+  zerion: Object.freeze({
+    networks: ['eth', 'base', 'arbitrum', 'bsc', 'solana'],     // GeckoTerminal network ids used to discover active wallets
+    poolsPerNetwork: 8, minDiscoveryTradeUsd: 1000, candidatePool: 120, maxPages: 8, minTradeUsd: 50,
+    pollMs: 20_000, maxFillAgeMs: 300_000, pricePollMs: 5_000,
+    minLiquidityUsd: 200_000, minVolume24hUsd: 100_000, minPairAgeDays: 3,   // only copy into tokens we could realistically exit
   }),
   scanIntervalMs: 5 * 60_000,
   confirmWindowMs: 15 * 60_000,

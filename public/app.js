@@ -101,7 +101,7 @@ function renderPositions(s) {
   const pend = s.pending.map((p) => `<div class="item"><div class="meta"><b>${esc(p.symbol)}</b><span class="pill amber">awaiting candle confirmation</span><span>ref ${price(p.refPrice)}</span><span>score ${p.score}</span><span>${ago(p.createdAt)}</span></div></div>`).join('');
   if (!s.positions.length && !pend) { el.innerHTML = '<div class="empty">100% cash. No open paper positions.</div>'; return; }
   el.innerHTML = s.positions.map((p) => `<div class="item" data-sym="${esc(p.symbol)}" style="cursor:pointer">
-    <div class="meta"><b>${esc(p.symbol)}</b><span class="pill ${p.side === 'short' ? 'bad' : 'good'}">${esc(p.side)}</span>${p.source === 'copy' ? `<span class="pill amber" title="${esc(p.trader)}">copy ${esc(p.trader.slice(0, 8))} · ${(p.traderWinRate * 100).toFixed(0)}% win rate</span>` : ''}<span>entry ${price(p.entry)}</span>${p.leaderPx ? `<span>leader ${price(p.leaderPx)}</span>` : ''}<span>now ${price(p.price)}</span>${p.target ? `<span>target ${price(p.target)}</span>` : ''}<span>${p.source === 'copy' ? 'hard stop' : 'stop'} ${price(p.stop)}</span>${p.trailing ? `<span>trail ${price(p.trailing)}</span>` : ''}${p.rr != null ? `<span>R:R ${p.rr.toFixed(2)}</span>` : ''}<span>${money(p.notional)}</span></div>
+    <div class="meta"><b>${esc(p.symbol)}</b><span class="pill ${p.side === 'short' ? 'bad' : 'good'}">${esc(p.side)}</span>${p.source === 'copy' ? `<span class="pill amber" title="${esc(p.trader)}">copy ${p.venue === 'onchain' ? 'on-chain ' : ''}${esc(p.trader.slice(0, 8))} · ${(p.traderWinRate * 100).toFixed(0)}% win rate</span>` : ''}<span>entry ${price(p.entry)}</span>${p.leaderPx ? `<span>leader ${price(p.leaderPx)}</span>` : ''}<span>now ${price(p.price)}</span>${p.target ? `<span>target ${price(p.target)}</span>` : ''}<span>${p.source === 'copy' ? 'hard stop' : 'stop'} ${price(p.stop)}</span>${p.trailing ? `<span>trail ${price(p.trailing)}</span>` : ''}${p.rr != null ? `<span>R:R ${p.rr.toFixed(2)}</span>` : ''}<span>${money(p.notional)}</span></div>
     <div><b class="${cls(p.pnl)}">${money(p.pnl)} (${pct(p.pnlPct)})</b> <span class="muted">net of fees/slippage · opened ${ago(p.openedAt)}</span></div>
     <div class="why"><b>Why it entered:</b> ${esc(p.why)}</div></div>`).join('') + pend;
 }
@@ -129,21 +129,27 @@ function renderReflections(s) {
 
 function renderCopy(c) {
   if (!c) return;
-  const d = c.discovery, k = c.counts;
-  $('#copy-status').textContent = `${k.qualified} qualified (${k.preferred} at ≥80%) of ${k.evaluated} evaluated · tracking ${k.tracking} · HL feed ${c.hl.connected ? 'live' : 'offline'}` +
-    (d.phase === 'evaluating traders' ? ` · evaluating ${d.evaluated}/${d.total}` : d.phase !== 'idle' ? ` · ${d.phase}` : '') + (d.error ? ` · error: ${d.error}` : '');
+  const k = c.counts, hlS = c.sources.hyperliquid, zr = c.sources.zerion;
+  const phase = (d) => (d.phase === 'evaluating traders' || d.phase === 'evaluating wallets' ? `scoring ${d.evaluated}/${d.total}` : d.phase !== 'idle' ? d.phase : 'idle');
+  $('#copy-status').textContent = `${k.qualified} qualified (${k.preferred} at ≥80%) of ${k.evaluated} scored · tracking ${k.tracking} · ` +
+    `Hyperliquid: ${hlS.connected ? 'live' : 'offline'}, ${phase(hlS.discovery)} · Zerion: ${zr.enabled ? phase(zr.discovery) : 'OFF (no API key)'}`;
   const short = (a) => a.slice(0, 6) + '…' + a.slice(-4);
   const badge = (t) => t.tracking ? `<span class="pill good">tracking${t.tier === 'preferred' ? ' · ≥80%' : ' · ≥75%'}</span>` : t.status === 'qualified' ? '<span class="pill amber">qualified (bench)</span>' : '<span class="pill bad">rejected</span>';
+  const src = (t) => t.source === 'zerion' ? `<span class="pill" title="${esc((t.chains || []).join(', '))}">on-chain</span>` : '<span class="pill">Hyperliquid</span>';
   const rows = c.traders.map((t) => `<tr>
+    <td>${src(t)}</td>
     <td title="${esc(t.address)}"><b>${esc(t.name || short(t.address))}</b>${t.name ? `<br><span class="muted">${esc(short(t.address))}</span>` : ''}</td>
     <td>${badge(t)}</td><td class="r ${t.winRate >= 0.8 ? 'up' : t.winRate >= 0.75 ? '' : 'down'}"><b>${(t.winRate * 100).toFixed(0)}%</b></td>
     <td class="r">${t.trades}</td><td class="r">${t.profitFactor >= 99 ? '∞' : t.profitFactor.toFixed(1)}</td><td class="r ${cls(t.netPnl)}">${money(t.netPnl)}</td>
     <td class="r">${t.perDay.toFixed(1)}</td><td class="r">${t.days}d</td><td class="r">${money(t.accountValue)}</td>
     <td>${t.holding.length ? esc(t.holding.join(', ')) : '<span class="muted">flat / not copied</span>'}</td>
     <td class="muted" style="white-space:normal;min-width:180px">${esc(t.reason || '')}</td></tr>`).join('');
-  $('#copy').innerHTML = c.traders.length
-    ? `<table><thead><tr><th>Trader</th><th>Status</th><th class="r">Win rate</th><th class="r">Closed trades</th><th class="r">Profit factor</th><th class="r">Net P&amp;L (${c.rules.windowDays}d)</th><th class="r">Closes/day</th><th class="r">History</th><th class="r">Account</th><th>Holding (copied)</th><th>Why rejected</th></tr></thead><tbody>${rows}</tbody></table>`
-    : `<div class="empty">${d.phase === 'idle' && !d.finishedAt ? 'Starting…' : 'Scanning the Hyperliquid leaderboard and scoring traders. Nobody is copied until they pass: win rate ≥ 75%, ≥ 30 closed trades, 7+ days of history, profit factor ≥ 1.5.'}</div>`;
+  const notes = [];
+  if (!zr.enabled) notes.push(`<div class="empty" style="padding:8px 12px">On-chain copy trading is off: ${esc(zr.status)}. Add ZERION_API_KEY to .env and restart.</div>`);
+  else if (zr.status !== 'ok') notes.push(`<div class="empty warn" style="padding:8px 12px">Zerion: ${esc(zr.status)}</div>`);
+  $('#copy').innerHTML = notes.join('') + (c.traders.length
+    ? `<table><thead><tr><th>Source</th><th>Trader / wallet</th><th>Status</th><th class="r">Win rate</th><th class="r">Closed trades</th><th class="r">Profit factor</th><th class="r">Net P&amp;L (${c.rules.windowDays}d)</th><th class="r">Closes/day</th><th class="r">History</th><th class="r">Account</th><th>Holding (copied)</th><th>Why rejected</th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<div class="empty">Scanning the Hyperliquid leaderboard and on-chain wallets and scoring traders. Nobody is copied until they pass: win rate ≥ 75%, ≥ 30 closed trades, 7+ days of history, profit factor ≥ 1.5.</div>`);
 }
 
 function render(s) {

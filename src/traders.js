@@ -156,7 +156,7 @@ async function cycle() {
 }
 
 export async function startTraders() {
-  for (const r of (await db.loadTraders()) ?? []) traders.map.set(r.address, { ...r, win_rate: Number(r.win_rate), profit_factor: Number(r.profit_factor) });
+  for (const r of ((await db.loadTraders()) ?? []).filter((x) => x.source === 'hyperliquid')) traders.map.set(r.address, { ...r, win_rate: Number(r.win_rate), profit_factor: Number(r.profit_factor) });
   if (traders.map.size) log(`Restored ${traders.map.size} previously evaluated traders from Supabase`);
   select(); // resume tracking known-good traders immediately, before any new evaluation finishes
   (async () => { for (;;) { await cycle(); await sleep(30 * 60_000); } })();

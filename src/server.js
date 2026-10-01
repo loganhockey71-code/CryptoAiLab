@@ -6,6 +6,7 @@ import { feed } from './exchange.js';
 import { universe } from './universe.js';
 import * as engine from './engine.js';
 import * as copy from './copy.js';
+import * as onchain from './onchain.js';
 import { hl, livePost } from './hyperliquid.js';
 
 const app = express();
@@ -81,7 +82,7 @@ app.post('/api/manual-review/clear', (req, res) => {
 
 const server = app.listen(config.port, '127.0.0.1', () => {
   log(`Dashboard: http://localhost:${config.port}  (PAPER_TRADING=true, paper capital $${config.risk.startingCapital})`);
-  engine.start().then(() => copy.start()).catch((e) => { warn('engine failed to start:', e); });
+  engine.start().then(() => copy.start()).then(() => onchain.start()).catch((e) => { warn('engine failed to start:', e); });
 });
 server.on('error', (e) => { console.error('Server error:', e.message); process.exit(1); });
 

@@ -5,6 +5,7 @@ import * as engine from './engine.js';
 import { hl, isPerp, fetchFills, getState } from './hyperliquid.js';
 import { traders, startTraders } from './traders.js';
 import { db } from './db.js';
+import * as onchain from './onchain.js';
 
 const C = config.copy, R = config.risk;
 const seen = new Set();          // fill ids already handled
@@ -134,7 +135,7 @@ function enqueue(address, fn) {
 /** Addresses that must stay subscribed: every tracked trader plus anyone we currently hold a copied position from. */
 function subscriptions() {
   const set = new Set([...traders.map.values()].filter((t) => t.tracking).map((t) => t.address));
-  for (const p of engine.state.positions.values()) if (p.copy?.trader) set.add(p.copy.trader);
+  for (const p of engine.state.positions.values()) if (p.venue === 'hl' && p.copy?.trader) set.add(p.copy.trader);
   return set;
 }
 const syncSubscriptions = () => hl.trackUsers(subscriptions());
@@ -187,24 +188,31 @@ export async function start() {
   log('Copy engine running (paper): mirrors only traders with a verified win rate >= 75%');
 }
 
-/** Dashboard data. */
+/** Dashboard data: Hyperliquid traders and Zerion on-chain wallets together. */
 export function snapshot() {
   const all = [...traders.map.values()];
   const row = (t) => ({
-    address: t.address, name: t.display_name, status: t.status, tier: t.tier, tracking: !!t.tracking, winRate: Number(t.win_rate), trades: t.trades,
+    source: 'hyperliquid', address: t.address, name: t.display_name, status: t.status, tier: t.tier, tracking: !!t.tracking, winRate: Number(t.win_rate), trades: t.trades,
     profitFactor: Number(t.profit_factor), netPnl: Number(t.net_pnl), perDay: Number(t.trades_per_day), days: t.window_days, accountValue: Number(t.account_value),
-    unrealized: t.unrealized_pnl != null ? Number(t.unrealized_pnl) : null, lastFillAt: t.last_fill_at, reason: t.reject_reason,
-    holding: [...engine.state.positions.values()].filter((p) => p.copy?.trader === t.address).map((p) => `${p.side} ${p.coin}`),
+    unrealized: t.unrealized_pnl != null ? Number(t.unrealized_pnl) : null, lastFillAt: t.last_fill_at, reason: t.reject_reason, chains: ['hyperliquid'],
+    holding: [...engine.state.positions.values()].filter((p) => p.venue === 'hl' && p.copy?.trader === t.address).map((p) => `${p.side} ${p.coin}`),
   });
-  const tracked = all.filter((t) => t.tracking).sort((a, b) => b.win_rate - a.win_rate);
-  const bench = all.filter((t) => t.status === 'qualified' && !t.tracking).sort((a, b) => b.win_rate - a.win_rate);
-  const near = all.filter((t) => t.status === 'rejected' && t.trades >= 10).sort((a, b) => b.win_rate - a.win_rate).slice(0, 12);
+  const byWin = (a, b) => b.winRate - a.winRate;
+  const hlTracked = all.filter((t) => t.tracking).sort((a, b) => b.win_rate - a.win_rate).map(row);
+  const hlBench = all.filter((t) => t.status === 'qualified' && !t.tracking).sort((a, b) => b.win_rate - a.win_rate).map(row);
+  const hlNear = all.filter((t) => t.status === 'rejected' && t.trades >= 10).sort((a, b) => b.win_rate - a.win_rate).slice(0, 12).map(row);
+  const hlCounts = { evaluated: all.length, qualified: all.filter((t) => t.status === 'qualified').length, preferred: all.filter((t) => t.status === 'qualified' && t.tier === 'preferred').length, tracking: hlTracked.length };
+  const oc = onchain.snapshot();
+  const sum = (k) => hlCounts[k] + oc.counts[k];
   return {
-    discovery: traders.discovery,
-    counts: { evaluated: all.length, qualified: all.filter((t) => t.status === 'qualified').length, preferred: all.filter((t) => t.status === 'qualified' && t.tier === 'preferred').length, tracking: tracked.length },
-    traders: [...tracked, ...bench, ...near].map(row),
-    hl: { connected: hl.connected, midAgeMs: Number.isFinite(hl.midAgeMs()) ? hl.midAgeMs() : null, subscribed: hl.users.size },
+    counts: { evaluated: sum('evaluated'), qualified: sum('qualified'), preferred: sum('preferred'), tracking: sum('tracking') },
+    traders: [...hlTracked, ...oc.tracked].sort(byWin).concat([...hlBench, ...oc.bench].sort(byWin), [...hlNear, ...oc.near].sort(byWin).slice(0, 14)),
+    sources: {
+      hyperliquid: { counts: hlCounts, discovery: traders.discovery, connected: hl.connected, midAgeMs: Number.isFinite(hl.midAgeMs()) ? hl.midAgeMs() : null },
+      zerion: { enabled: oc.enabled, status: oc.status, counts: oc.counts, discovery: oc.discovery },
+    },
     rules: { minWinRate: C.minWinRate, preferredWinRate: C.preferredWinRate, minTrades: C.minTrades, windowDays: C.windowDays, stopPct: C.stopPct, maxChasePct: C.maxChasePct },
   };
 }
+
 export const __test = { onFill };
