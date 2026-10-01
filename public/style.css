@@ -11,6 +11,11 @@ body { min-height: 100vh; }
 .badge.paper { background: rgba(91,157,255,.15); color: var(--blue); border: 1px solid rgba(91,157,255,.4); }
 .stats { display: flex; gap: 18px; flex-wrap: wrap; }
 .stat { display: flex; flex-direction: column; min-width: 70px; }
+html { scroll-behavior: smooth; }
+#trade-history { scroll-margin-top: 90px; }
+a.stat.jump { text-decoration: none; color: inherit; cursor: pointer; border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; }
+a.stat.jump:hover { border-color: #26a69a; }
+a.stat.jump span { color: #26a69a; }
 .stat b { font-size: 14px; font-variant-numeric: tabular-nums; }
 .stat span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
 .banner { margin: 10px 16px 0; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--amber); background: rgba(245,166,35,.1); color: var(--amber); display: flex; gap: 12px; align-items: center; }

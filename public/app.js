@@ -48,7 +48,7 @@ function renderStats(s) {
     stat('Realized P&L', money(p.realized_pnl), cls(p.realized_pnl)),
     stat('Today (UTC)', pct(p.dailyPnlPct), cls(p.dailyPnlPct)),
     stat('BTC 1h regime', btc.toUpperCase(), btc === 'bullish' ? 'up' : btc === 'bearish' ? 'down' : 'warn'),
-    stat('Trades', s.tradeCount ?? 0),
+    `<a class="stat jump" href="#trade-history" title="Jump to Trade History"><b>${s.tradeCount ?? 0}</b><span>Trades ↓ history</span></a>`,
     stat('Open', `${s.positions.length}/${s.limits.maxPositions}`),
     stat('Feed', h.wsConnected ? (h.feedStale ? 'STALE' : 'LIVE') : 'OFFLINE', h.wsConnected && !h.feedStale ? 'up' : 'down'),
     stat('Scan', s.scan.running ? esc(s.scan.progress || 'running') : s.scan.finishedAt ? `#${s.scan.count} ${ago(s.scan.finishedAt)}` : 'starting', s.scan.lastError ? 'down' : ''),
