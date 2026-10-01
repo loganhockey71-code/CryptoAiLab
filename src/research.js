@@ -4,13 +4,13 @@ import { config, warn } from './config.js';
 const { gemini, openrouter } = config.keys;
 export const llmAvailable = () => !!(gemini || openrouter);
 
-async function callGemini(prompt) {
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${config.models.gemini}:generateContent`, {
+async function callGemini(prompt, model) {
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-goog-api-key': gemini },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { responseMimeType: 'application/json', temperature: 0.2 },
+      generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 4096 },
     }),
     signal: AbortSignal.timeout(60_000),
   });
@@ -28,6 +28,7 @@ async function callOpenRouter(prompt) {
       messages: [{ role: 'user', content: prompt }],
       response_format: { type: 'json_object' },
       temperature: 0.2,
+      max_tokens: 4000,
     }),
     signal: AbortSignal.timeout(60_000),
   });
@@ -46,14 +47,22 @@ function parseJson(text) {
 
 export async function llmJson(prompt) {
   const providers = [];
-  if (gemini) providers.push(['gemini', callGemini]);
+  if (gemini) for (const m of config.models.gemini) providers.push([`gemini:${m}`, (p) => callGemini(p, m)]);
   if (openrouter) providers.push(['openrouter', callOpenRouter]);
   for (const [name, fn] of providers) {
-    try {
-      const out = parseJson(await fn(prompt));
-      if (out) return { json: out, provider: name };
-      warn(`${name} returned unparseable JSON`);
-    } catch (e) { warn('LLM call failed:', e.message); }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const out = parseJson(await fn(prompt));
+        if (out) return { json: out, provider: name };
+        warn(`${name} returned unparseable JSON`);
+      } catch (e) {
+        const transient = /-> (429|500|502|503|504)/.test(e.message) || e.name === 'TimeoutError';
+        if (name.startsWith('gemini') && transient) { warn(`${name} busy, trying next model`); break; }
+        warn(`LLM call failed (${name}, attempt ${attempt + 1}):`, e.message.replace(/\s+/g, ' ').slice(0, 160));
+        if (transient && attempt < 2) { await new Promise((r) => setTimeout(r, 2000 * (attempt + 1))); continue; }
+      }
+      break;
+    }
   }
   return null;
 }

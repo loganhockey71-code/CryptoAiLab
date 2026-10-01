@@ -34,8 +34,9 @@ export const config = {
     fred: env('FRED_API_KEY'),
   },
   models: {
-    gemini: 'gemini-2.5-flash',
-    openrouter: 'google/gemini-2.5-flash',
+    // tried in order; one congested or retired model must not take the Research Brain offline
+    gemini: ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-flash-latest'],
+    openrouter: 'google/gemini-3.5-flash',
   },
   // Deterministic risk constants. The self-learning system must never write to these.
   risk: Object.freeze({

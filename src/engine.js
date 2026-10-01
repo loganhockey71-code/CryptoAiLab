@@ -44,6 +44,7 @@ const coinState = (symbol) => {
 
 function noteSource(r) {
   if (!r) return;
+  if (r.fallbackFrom) state.sources[r.fallbackFrom.source] = { tier: r.tier, ok: false, fetchedAt: r.fetchedAt, error: `${r.fallbackFrom.error}: using ${r.source} instead` };
   state.sources[r.source] = { tier: r.tier, ok: r.ok, fetchedAt: r.fetchedAt, error: r.error ?? null };
 }
 
@@ -194,7 +195,7 @@ async function evaluateCandidates(ctxSources) {
   if (!llmAvailable()) { logDecision('info', '*', 'No LLM key configured (GEMINI_API_KEY / OPENROUTER_API_KEY): Research Brain offline, staying in cash'); return; }
 
   // Mathematical feasibility: technical+RVOL max 50, derivatives max 25, research max 25. Need >= 80 overall.
-  const derivAvailable = !!config.keys.coinglass;
+  const derivAvailable = true; // Coinglass, or the OKX public fallback; per-coin availability is checked below
   const needPartial = R.minConfluence - 25 - (derivAvailable ? 25 : 0);
   if (!derivAvailable) {
     logDecision('skipped', '*', `Derivatives data unavailable (COINGLASS_API_KEY not set): confluence is capped at 75 < ${R.minConfluence}, so no entries are possible`);
@@ -225,7 +226,7 @@ async function evaluateCandidates(ctxSources) {
 
     const provenance = {
       candles: { source: 'coinbase-exchange', tier: 1, at: cs.health.checkedAt }, priceAgeMs: fp.ageMs,
-      derivatives: { source: 'coinglass', tier: 2, at: deriv.fetchedAt },
+      derivatives: { source: deriv.source, tier: 2, at: deriv.fetchedAt },
       macro: { source: 'fred', tier: 3, ok: ctxSources.macro.ok, at: ctxSources.macro.fetchedAt },
       legislation: { source: 'congress.gov', tier: 3, ok: ctxSources.bills.ok, at: ctxSources.bills.fetchedAt },
       onchain: { source: 'etherscan', tier: 4, ok: ctxSources.onchain.ok, at: ctxSources.onchain.fetchedAt },
@@ -567,6 +568,8 @@ export async function start() {
 }
 
 /* ----------------------------------------------------------------- snapshot */
+
+export const isReady = () => !!state.portfolio;
 
 export function snapshotForUi() {
   const now = Date.now();

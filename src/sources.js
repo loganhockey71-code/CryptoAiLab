@@ -13,13 +13,51 @@ async function getJson(url, headers = {}, timeoutMs = 15_000) {
 const wrap = (tier, source, data, extra = {}) => ({ tier, source, fetchedAt: Date.now(), ok: true, data, ...extra });
 const fail = (tier, source, error) => ({ tier, source, fetchedAt: Date.now(), ok: false, data: null, error });
 
-/* ---------- Tier 2: Coinglass (funding rate, open interest) ---------- */
+/* ---------- Tier 2: derivatives. Coinglass first; OKX public perpetuals as an automatic, clearly-labelled fallback ---------- */
 const cgCache = new Map(); // symbol -> { at, value }
+let cgBlocked = null;      // { at, error } when Coinglass refused the key/plan; retried every 30 min
+
+const OKX = 'https://www.okx.com/api/v5/public';
+const oiHistory = [];      // [{ at, map: instId -> open interest USD }], kept ~2h
+async function okxOpenInterest() {
+  const last = oiHistory[oiHistory.length - 1];
+  if (!last || Date.now() - last.at > 4 * 60_000) {
+    const j = await getJson(`${OKX}/open-interest?instType=SWAP`);
+    if (j.code !== '0') throw new Error('okx open-interest: ' + j.msg);
+    oiHistory.push({ at: Date.now(), map: new Map(j.data.map((r) => [r.instId, Number(r.oiUsd)])) });
+    while (oiHistory.length && Date.now() - oiHistory[0].at > 2 * 3600_000) oiHistory.shift();
+  }
+  return oiHistory;
+}
+
+async function okxDerivatives(symbol, cgError) {
+  const instId = `${symbol}-USDT-SWAP`;
+  try {
+    const [fr, hist] = await Promise.all([getJson(`${OKX}/funding-rate?instId=${instId}`), okxOpenInterest()]);
+    if (fr.code !== '0' || !fr.data?.[0]) throw new Error(`no OKX perpetual for ${symbol}`);
+    const nowOi = hist[hist.length - 1].map.get(instId);
+    const ref = hist.find((h) => Date.now() - h.at >= 55 * 60_000) ?? null; // needs ~1h of uptime before OI change exists
+    const refOi = ref?.map.get(instId);
+    return wrap(2, 'okx-public', {
+      fundingRatePct: Number(fr.data[0].fundingRate) * 100,
+      openInterestUsd: nowOi ?? null,
+      oiChange1hPct: nowOi && refOi ? ((nowOi - refOi) / refOi) * 100 : null,
+      oiChange24hPct: null,
+    }, { fallbackFrom: { source: 'coinglass', error: cgError } });
+  } catch (e) {
+    return fail(2, 'okx-public', `${e.message} (coinglass: ${cgError})`);
+  }
+}
+
 export async function derivatives(symbol) {
-  if (!coinglass) return fail(2, 'coinglass', 'COINGLASS_API_KEY not set');
   const hit = cgCache.get(symbol);
   if (hit && Date.now() - hit.at < 10 * 60_000) return hit.value;
   let value;
+  if (!coinglass || (cgBlocked && Date.now() - cgBlocked.at < 30 * 60_000)) {
+    value = await okxDerivatives(symbol, coinglass ? cgBlocked.error : 'COINGLASS_API_KEY not set');
+    cgCache.set(symbol, { at: Date.now(), value });
+    return value;
+  }
   try {
     const h = { 'CG-API-KEY': coinglass };
     const base = 'https://open-api-v4.coinglass.com/api/futures';
@@ -27,6 +65,7 @@ export async function derivatives(symbol) {
       getJson(`${base}/funding-rate/exchange-list?symbol=${symbol}`, h),
       getJson(`${base}/open-interest/exchange-list?symbol=${symbol}`, h),
     ]);
+    for (const r of [fr, oi]) if (r.code != null && String(r.code) !== '0') throw new Error(`coinglass ${r.code} ${r.msg}`);
     const frRows = fr.data?.find?.((d) => d.symbol === symbol)?.stablecoin_margin_list ?? fr.data ?? [];
     const rates = (Array.isArray(frRows) ? frRows : []).map((r) => Number(r.funding_rate)).filter(Number.isFinite);
     const oiAll = Array.isArray(oi.data) ? oi.data.find((d) => d.exchange === 'All') : null;
@@ -38,7 +77,8 @@ export async function derivatives(symbol) {
       oiChange24hPct: oiAll ? Number(oiAll.open_interest_change_percent_24h) : null,
     });
   } catch (e) {
-    value = fail(2, 'coinglass', e.message);
+    cgBlocked = { at: Date.now(), error: e.message };
+    value = await okxDerivatives(symbol, e.message);
   }
   cgCache.set(symbol, { at: Date.now(), value });
   return value;

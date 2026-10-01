@@ -19,13 +19,13 @@ app.use(express.static(path.join(config.root, 'public')));
 app.get('/vendor/lightweight-charts.js', (req, res) =>
   res.sendFile(path.join(config.root, 'node_modules/lightweight-charts/dist/lightweight-charts.standalone.production.js')));
 
-app.get('/api/state', (req, res) => res.json(engine.snapshotForUi()));
+app.get('/api/state', (req, res) => (engine.isReady() ? res.json(engine.snapshotForUi()) : res.status(503).json({ error: 'starting' })));
 
 // Server-sent events: one full snapshot per second.
 app.get('/api/stream', (req, res) => {
   res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
   res.flushHeaders();
-  const send = () => { try { res.write(`data: ${JSON.stringify(engine.snapshotForUi())}\n\n`); } catch { /* client gone */ } };
+  const send = () => { if (!engine.isReady()) return; try { res.write(`data: ${JSON.stringify(engine.snapshotForUi())}\n\n`); } catch { /* client gone */ } };
   send();
   const t = setInterval(send, 1000);
   req.on('close', () => clearInterval(t));
