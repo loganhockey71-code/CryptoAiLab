@@ -44,14 +44,13 @@ export const config = {
   // Deterministic risk constants. The self-learning system must never write to these.
   risk: Object.freeze({
     startingCapital: 2000,
-    minPositionPct: 0.25,
+    riskPerTradePct: 0.01,       // hard cap: a stopped-out trade (stop + fees + slippage) may lose at most 1% of equity. There is no minimum position size.
     maxPositionPct: 0.30,
     maxOpenPositions: 3,
     minComponent: 12,            // each of technical / volume / smart money / research must pass on its own (of 25)
-    // Stop-loss distance by coin (fraction below entry). Normal band per tier; with confidence >= stopOverrideConfidence the stop may be
-    // wider than the band, but NEVER wider than stopAbsMaxPct. Memes are capped at 10% and sit in the same 6-10% band as the Top 51-100.
-    stopBands: Object.freeze({ btc: [0.015, 0.02], eth: [0.02, 0.025], top20: [0.025, 0.03], mid: [0.03, 0.06], small: [0.06, 0.10], meme: [0.06, 0.10] }),
-    stopAbsMaxPct: 0.15, stopOverrideConfidence: 85,
+    // Stop-loss distance by coin (fraction below entry). Every band is clamped to stopAbsMaxPct: NO stop is ever wider than 4%, on any pair or chain, memes included.
+    stopBands: Object.freeze({ btc: [0.015, 0.02], eth: [0.02, 0.025], top20: [0.025, 0.03], mid: [0.03, 0.04], small: [0.04, 0.04], meme: [0.04, 0.04] }),
+    stopAbsMaxPct: 0.04,
     // Take-profit zone by tier (fraction above entry): reaching it banks a PARTIAL (partialPct) and the rest runs on a dynamic trailing stop.
     // Memes may target above their band (cap 50%). Targets are never forced: no trade is held for its target, the stop/trail/exit rules decide.
     targetBands: Object.freeze({ btc: [0.04, 0.06], eth: [0.05, 0.08], top20: [0.06, 0.10], mid: [0.08, 0.15], small: [0.10, 0.20], meme: [0.10, 0.25] }),
@@ -77,9 +76,10 @@ export const config = {
     minSpanDays: 7, minActiveDays: 5, maxTradesPerDay: 40, minMedianHoldMin: 10,   // history must be long enough, and not bot-like (closes/day)
     maxCandidateAccount: 5_000_000,
     maxUnrealizedLossPct: 0.10, minAccountValue: 10_000, maxLastFillDays: 14,
-    maxTracked: 7, maxCopyPositions: 2,           // copies may use 2 of the 3 position slots; one stays free for my own analysis candidatePool: 200, reevalHours: 12,
-    maxChasePct: 0.01, stopPct: 0.04, stopMaxPct: 0.07,   // copy hard stop is 4%; may be set wider for a specific trade but NEVER beyond 7%
-     maxFillAgeMs: 120_000, minNotional: 10,
+    maxTracked: 7, maxCopyPositions: 2,           // copies may use 2 of the 3 position slots; one stays free for my own analysis
+    candidatePool: 200, reevalHours: 12,
+    maxChasePct: 0.01, stopPct: 0.04, stopMaxPct: 0.04,   // copy hard stop is 4% and can never be wider
+    maxFillAgeMs: 120_000, minNotional: 10,
     // Consecutive losing copies of the SAME trader (a win resets it): 1 keep copying, 2 pause, 3 long pause + re-score, 4 review, 5+ removed.
     loserStreak: Object.freeze({ pause2Hours: 3, pause3Hours: 24, reviewAt: 4, removeAt: 5 }),
   }),

@@ -103,22 +103,18 @@ export function requirements(c, smartMoney) {
   return { fails, floor: F };
 }
 
-/** Stop band [min, max] for a coin: BTC 1.5-2%, ETH 2-2.5%, Top 20 2.5-3%, Top 21-50 3-6%, Top 51-100 6-10%, memes 6-10%. */
+/** Stop band [min, max] for a coin: BTC 1.5-2%, ETH 2-2.5%, Top 20 2.5-3%, Top 21-50 3-4%, Top 51-100 and memes 4%. Never wider than the 4% hard cap. */
 export function stopBand(symbol, rank) {
   const B = R.stopBands;
   const tier = R.memeSymbols.includes(symbol) ? 'meme' : symbol === 'BTC' ? 'btc' : symbol === 'ETH' ? 'eth' : rank <= 20 ? 'top20' : rank <= 50 ? 'mid' : 'small';
-  return { tier, min: B[tier][0], max: B[tier][1], absMax: R.stopAbsMaxPct };
+  return { tier, min: Math.min(B[tier][0], R.stopAbsMaxPct), max: Math.min(B[tier][1], R.stopAbsMaxPct), absMax: R.stopAbsMaxPct };
 }
 
-/**
- * Normalise the stop into the coin's band, then compute net R:R after fees + slippage. A stop wider than the band is only kept when the
- * signal's confidence >= stopOverrideConfidence (and memes never exceed 10%); nothing is ever wider than the 15% absolute maximum.
- */
-export function shapeTrade(entry, llmStop, llmTarget, { symbol, rank, confidence = 0 } = {}) {
+/** Normalise the stop into the coin's band (never wider than 4%), then compute net R:R after fees + slippage. */
+export function shapeTrade(entry, llmStop, llmTarget, { symbol, rank } = {}) {
   const band = stopBand(symbol, rank);
   const rawDist = llmStop != null && llmStop < entry ? (entry - llmStop) / entry : band.max;
-  const ceiling = band.tier === 'meme' ? band.max : confidence >= R.stopOverrideConfidence ? band.absMax : band.max;
-  const stopDist = clamp(rawDist, band.min, ceiling);
+  const stopDist = clamp(rawDist, band.min, band.max);
   const stop = entry * (1 - stopDist);
   // The target is only the partial-profit level: cap it at the tier's top (memes: 50%) but never stretch a modest target upward to pass R:R.
   const tb = R.targetBands[band.tier];
@@ -127,13 +123,6 @@ export function shapeTrade(entry, llmStop, llmTarget, { symbol, rank, confidence
   const reward = target - entry - ROUND_TRIP_COST_PCT * entry;
   const risk = entry - stop + ROUND_TRIP_COST_PCT * entry;
   return { stop, target, stopDist, band, targetBand: tb, rr: reward > 0 ? reward / risk : 0, grossRr: (target - entry) / (entry - stop) };
-}
-
-export function positionSize({ equity, cash, score }) {
-  const pct = R.minPositionPct + (R.maxPositionPct - R.minPositionPct) * clamp((score - R.minConfluence) / (100 - R.minConfluence), 0, 1);
-  let notional = equity * pct;
-  if (notional * (1 + R.feePct) > cash) notional = cash / (1 + R.feePct);
-  return { pct, notional };
 }
 
 /** Is trading globally allowed right now? (circuit breakers) */

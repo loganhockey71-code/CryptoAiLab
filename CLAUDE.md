@@ -20,8 +20,8 @@ Save this content as `CLAUDE.md` in the root folder of your project (alongside `
 ## Risk Management & Safety Limits
 - Default State: 100% Cash (Long-only for v1).
 - Entry Confirmation: Candle confirmation required before entering any setup.
-- Position Limits: Max 25%–30% portfolio equity per trade ($500–$600); max 3 active positions.
-- Risk & Exit: Mandatory risk stop-loss by coin: BTC 1.5-2.0%, ETH 2.0-2.5%, Top 20 2.5-3.0%, Top 21-50 3-6%, Top 51-100 6-10%, memes 10% max. A wider stop is allowed only on very high conviction (confidence >= 85) and NEVER beyond the 15% absolute maximum. Take-profit zone by tier: BTC 4-6%, ETH 5-8%, Top 20 6-10%, Top 21-50 8-15%, Top 51-100 10-20%, memes 10-25%+. On reaching it, bank a 50% partial, move the stop up to breakeven (tighten only) and let the rest run on a dynamic trailing stop (volatility, fading momentum, BTC regime; memes trail most aggressively). Extra profit is taken into resistance when overextended; the runner exits on a momentum reversal or a non-bullish BTC regime. Targets are never forced and a stop is NEVER widened to chase profit. BTC 1h regime must be bullish. Min R:R ratio >= 2.5:1. Confluence score >= 80/100.
+- Position Sizing: risk-based, no minimum size. `size_usd = (equity x 1%) / (stop% + estimated fees+slippage%)`, never above the 30% per-position cap; max 3 active positions. A stopped-out trade loses at most ~1% of equity including costs.
+- Risk & Exit: Mandatory stop-loss by coin: BTC 1.5-2.0%, ETH 2.0-2.5%, Top 20 2.5-3.0%, Top 21-50 3-4%, Top 51-100 and memes 4%. NO stop is ever wider than 4% on any pair or chain, and a stop is never widened after entry. Take-profit zone by tier: BTC 4-6%, ETH 5-8%, Top 20 6-10%, Top 21-50 8-15%, Top 51-100 10-20%, memes 10-25%+; reaching it banks a 50% partial and moves the stop to breakeven (tighten only). The remainder runs on a Chandelier trailing stop (highest high - k x ATR(15m), k = 3.0 / 2.5 / 2.0 / 1.5 as profit passes 0 / 1R / 2R / 3R, tighter on fading momentum or a non-bullish BTC regime). `momentum_reversal` needs structure (2 consecutive lower 1m lows on declining volume, or 2 closes below the 21 EMA with RSI < 45); one red candle never exits a winner. Targets are never forced. BTC 1h regime must be bullish. Min R:R ratio >= 2.5:1. Confluence score >= 80/100.
 - Circuit Breakers: -5% daily equity loss halts trading for the day. 3 consecutive loss days freeze execution until manual review. 3 single-day losses or 2 losses in 60 mins force a 3-hour freeze. 2-hour lockout on stop-loss hits.
 - Execution Realism: Subtract 0.10% fee and 0.05% slippage per trade.
 
@@ -31,7 +31,7 @@ Save this content as `CLAUDE.md` in the root folder of your project (alongside `
 - The self-learning system must NEVER automatically alter core risk parameters or circuit breakers.
 
 ## Database Tables (Supabase)
-`portfolio`, `top_100_coins`, `trade_logs`, `market_signals`, `trade_reflections`, `tracked_traders`
+`portfolio`, `top_100_coins`, `trade_logs`, `market_signals`, `trade_reflections`, `tracked_traders`, `trade_exit_events` (one row per exit leg, partial or final: price, size_usd, realized_pnl, exit_reason, iso_timestamp, FK to `trade_logs`; migration in `supabase/migrations/`)
 
 ## Copy Trading (Hyperliquid, paper only)
 - Sources: Hyperliquid public leaderboard + info/WebSocket API (read-only, no keys, no order/signing endpoints). Zerion (on-chain wallets, key in `.env` as `ZERION_API_KEY`) is the second source; both run at the same time and share the same rules.
@@ -42,7 +42,7 @@ Save this content as `CLAUDE.md` in the root folder of your project (alongside `
 
 ## Per-Trader Loss-Streak Ladder (all copy sources)
 Counts consecutive losing copies of the SAME trader; any win resets it. Exits/mirrored closes are never blocked, only new entries and adds.
-- 1 loss: keep copying. 2 in a row: pause that trader 3h (range 2-4h). 3 in a row: pause 24h and re-score the trader (must still qualify). 4 in a row: stop copying until manual review. 5+: removed from the active pool (same manual release needed).
+- 1 loss: keep copying. 2 in a row: status PAUSED for 3h and an immediate re-score. 3 in a row: pause 24h and re-score the trader (must still qualify). 4 in a row: stop copying until manual review. 5+: removed from the active pool (same manual release needed).
 - Derived from closed trades in Supabase, so it survives restarts. Operator release: dashboard "release" button (`POST /api/traders/release`), which clears the streak and forces a re-score.
 - Thresholds live in `config.copy.loserStreak`; it is a risk rule, so self-learning must never change it.
 
@@ -57,3 +57,6 @@ Counts consecutive losing copies of the SAME trader; any win resets it. Exits/mi
 - Tier 3 (official): White House presidential actions, Federal Register executive orders, Federal Reserve press releases + speeches, SEC and CFTC press releases, Congress.gov bills (crypto, tariffs, sanctions, securities, banking vocabulary), FRED macro series.
 - Tier 4 (news / unofficial): CoinDesk, Cointelegraph, BBC World, NPR Politics, CNBC Markets, Google News (tariffs/sanctions/Fed/executive orders/war/election), and an UNOFFICIAL Truth Social mirror (trumpstruth.org). X/Twitter is not covered (no free API).
 - Political items are market-wide context for the LLM Research Brain only (counted under macro_gov). They never trigger a trade, and copy trading ignores them.
+
+## Immutable Guardrail Layer (`src/guardrails.js`)
+Every entry (strategy and copy) goes through `guard.finalizeEntry()` and every stop change through `guard.keepStopTight()`. The module's limits are deep-frozen copies of `config.risk`; strategy code can propose stops/sizes but cannot exceed the 1% risk cap, the 4% stop cap, the 30% position cap, or the circuit breakers. Self-learning never touches it.

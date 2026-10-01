@@ -48,6 +48,8 @@ export const db = {
   recentTrades: (n = 100) => run('recentTrades', (c) => c.from('trade_logs').select('*').order('entry_time', { ascending: false }).limit(n)),
   closedTradesSince: (iso) => run('closedTradesSince', (c) => c.from('trade_logs').select('*').eq('status', 'closed').gte('exit_time', iso).order('exit_time')),
 
+  insertExitEvent: (e) => run('insertExitEvent', (c) => c.from('trade_exit_events').insert(e)),
+
   insertReflection: (r) => run('insertReflection', (c) => c.from('trade_reflections').insert(r).select().single()),
   recentReflections: (n = 5) => run('recentReflections', (c) => c.from('trade_reflections').select('*').order('created_at', { ascending: false }).limit(n)),
 };
