@@ -120,10 +120,13 @@ export function shapeTrade(entry, llmStop, llmTarget, { symbol, rank, confidence
   const ceiling = band.tier === 'meme' ? band.max : confidence >= R.stopOverrideConfidence ? band.absMax : band.max;
   const stopDist = clamp(rawDist, band.min, ceiling);
   const stop = entry * (1 - stopDist);
-  const target = llmTarget;
+  // The target is only the partial-profit level: cap it at the tier's top (memes: 50%) but never stretch a modest target upward to pass R:R.
+  const tb = R.targetBands[band.tier];
+  const tDist = llmTarget > entry ? (llmTarget - entry) / entry : 0;
+  const target = entry * (1 + Math.min(tDist, band.tier === 'meme' ? R.memeTargetCap : tb[1]));
   const reward = target - entry - ROUND_TRIP_COST_PCT * entry;
   const risk = entry - stop + ROUND_TRIP_COST_PCT * entry;
-  return { stop, target, stopDist, band, rr: reward > 0 ? reward / risk : 0, grossRr: (target - entry) / (entry - stop) };
+  return { stop, target, stopDist, band, targetBand: tb, rr: reward > 0 ? reward / risk : 0, grossRr: (target - entry) / (entry - stop) };
 }
 
 export function positionSize({ equity, cash, score }) {

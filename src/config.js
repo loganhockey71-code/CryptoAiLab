@@ -52,6 +52,10 @@ export const config = {
     // wider than the band, but NEVER wider than stopAbsMaxPct. Memes are capped at 10% and sit in the same 6-10% band as the Top 51-100.
     stopBands: Object.freeze({ btc: [0.015, 0.02], eth: [0.02, 0.025], top20: [0.025, 0.03], mid: [0.03, 0.06], small: [0.06, 0.10], meme: [0.06, 0.10] }),
     stopAbsMaxPct: 0.15, stopOverrideConfidence: 85,
+    // Take-profit zone by tier (fraction above entry): reaching it banks a PARTIAL (partialPct) and the rest runs on a dynamic trailing stop.
+    // Memes may target above their band (cap 50%). Targets are never forced: no trade is held for its target, the stop/trail/exit rules decide.
+    targetBands: Object.freeze({ btc: [0.04, 0.06], eth: [0.05, 0.08], top20: [0.06, 0.10], mid: [0.08, 0.15], small: [0.10, 0.20], meme: [0.10, 0.25] }),
+    memeTargetCap: 0.5, partialPct: 0.5, extraPartialPct: 0.25,
     memeSymbols: Object.freeze(['DOGE', 'SHIB', 'PEPE', 'BONK', 'WIF', 'FLOKI', 'TRUMP', 'MEME', 'BRETT', 'POPCAT', 'MOG', 'PENGU', 'FARTCOIN', 'SPX', 'TURBO', 'NEIRO', 'PNUT', 'GOAT', 'MOODENG', 'BOME']),
     minRR: 2.5,
     minConfluence: 80,

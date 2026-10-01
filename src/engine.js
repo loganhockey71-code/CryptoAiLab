@@ -289,7 +289,7 @@ async function evaluateCoinInner(cs, trigger, ctxSources, lessons, stats) {
   const tfSummary = Object.fromEntries(Object.entries(cs.snaps).map(([k, v]) => [k, v && { trendUp: v.trendUp, rsi: v.rsi && +v.rsi.toFixed(1), macdHist: v.macdHist, ema20: v.ema20, ema50: v.ema50 }]));
   const act = activity(cs);
   const sig = await generateSignal({
-    symbol: cs.symbol, name: cs.coin.name, stopBand: riskLib.stopBand(cs.symbol, cs.coin.rank), price: fp.price, btcRegime: state.btc.regime, timeframes: tfSummary, rvol: cs.rvol,
+    symbol: cs.symbol, name: cs.coin.name, stopBand: riskLib.stopBand(cs.symbol, cs.coin.rank), targetBand: R.targetBands[riskLib.stopBand(cs.symbol, cs.coin.rank).tier], price: fp.price, btcRegime: state.btc.regime, timeframes: tfSummary, rvol: cs.rvol,
     derivatives: deriv.data, macro: ctxSources.macro.data, legislation: ctxSources.bills.data, onchain: ctxSources.onchain.data, politics: compactPolitics(ctxSources.politics),
     news: cs.sentiment ? { coin: cs.sentiment, market: (ctxSources.news.data || []).slice(0, 8) } : { market: (ctxSources.news.data || []).slice(0, 8) },
     activity: { whySelected: trigger.kind === 'mover' ? 'unusually active / trending' : 'regular scan', flags: act.reasons, change1h: pct(act.h1), change24h: act.h24 == null ? null : pct(act.h24) },
@@ -457,7 +457,7 @@ async function tryEnter(p, confirmation) {
     const id = row?.id ?? `mem-trade-${Date.now()}`;
     state.portfolio.cash -= notional + fee;
     state.positions.set(id, {
-      id, symbol: p.symbol, product: p.product, signalId: p.id, qty, entry: entryPx, notional, fee, stop: shaped.stop, target: shaped.target,
+      id, symbol: p.symbol, product: p.product, signalId: p.id, qty, entry: entryPx, notional, fee, stop: shaped.stop, target: shaped.target, band: shaped.band, partialTaken: false,
       trailing: null, highWater: entryPx, openedAt: Date.now(), rationale: why, lastPrice: live, sizePct, trigger: p.trigger ?? { kind: 'scan', reasons: [] },
       ctx: { conf: p.conf, sig: p.sig, patterns: p.ctx.patterns, sentiment: p.ctx.sentiment, btc: btc.regime, confirmation },
     });
@@ -479,21 +479,45 @@ function onTick(product, price) {
     if (pos.product !== product || pos.closing) continue;
     pos.lastPrice = price;
     if (price > pos.highWater) pos.highWater = price;
+    if (pos.target && !partialDone(pos) && price >= pos.target) takePartial(pos, price, R.partialPct, 'target_partial');
     if (price >= pos.entry * (1 + R.trailActivatePct)) {
-      const cs = state.coins.get(pos.symbol);
-      const base = clampN(cs?.atr15 ? (1.5 * cs.atr15) / price : 0.02, 0.01, 0.03);
-      const trailPct = price >= pos.target ? Math.max(0.0075, base * 0.6) : base; // tighten once the target zone is reached, but never cap the upside
-      const next = pos.highWater * (1 - trailPct);
-      if (next > (pos.trailing ?? 0)) {
+      const next = pos.highWater * (1 - trailPctFor(pos, price));
+      if (next > (pos.trailing ?? 0)) {                              // ratchet only: a stop/trail is never lowered to chase more profit
         pos.trailing = next;
         if (!pos.syncAt || Date.now() - pos.syncAt > 5000) { pos.syncAt = Date.now(); db.updateTrade(pos.id, { trailing_stop: next, high_water: pos.highWater }); }
       }
     }
     const level = Math.max(pos.stop, pos.trailing ?? 0);
-    if (price <= level) closePosition(pos, price, pos.trailing && level === pos.trailing ? 'trailing_stop' : 'stop_loss');
+    if (price <= level) closePosition(pos, price, pos.trailing && level === pos.trailing ? 'trailing_stop' : partialDone(pos) && pos.stop >= pos.entry ? 'breakeven_stop' : 'stop_loss');
   }
 }
 const clampN = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+
+const partialDone = (pos) => pos.partialTaken ?? (pos.realized ?? 0) !== 0;
+const bandOf = (pos) => (pos.band ??= riskLib.stopBand(pos.symbol, state.coins.get(pos.symbol)?.coin?.rank ?? 100));
+
+function takePartial(pos, price, fraction, reason) {
+  if (reason === 'target_partial') {
+    pos.partialTaken = true;
+    pos.stop = Math.max(pos.stop, pos.entry);                      // tighten only: once the target is banked the stop moves up to breakeven
+  }
+  reducePosition(pos, fraction, price, reason).catch((e) => warn('partial exit failed', pos.symbol, e.message));
+}
+
+/**
+ * Dynamic trailing distance. Starts from volatility (1.5 x 15m ATR) kept inside a range scaled to the coin's stop band, then tightens
+ * once the target has been banked and further when momentum fades (pos.momFactor, set per 1m candle) or the BTC regime is not bullish.
+ * Memes trail more aggressively after the target. Never loosens an existing trailing stop (the caller only ratchets upward).
+ */
+function trailPctFor(pos, price) {
+  const band = bandOf(pos), cs = state.coins.get(pos.symbol);
+  const lo = band.min * 0.6, hi = band.min * 1.4;
+  let pctDist = clampN(cs?.atr15 ? (1.5 * cs.atr15) / price : band.min, lo, hi);
+  if (partialDone(pos)) pctDist *= band.tier === 'meme' ? 0.55 : 0.65;
+  pctDist *= pos.momFactor ?? 1;
+  if (!state.btc.bullish) pctDist *= 0.7;
+  return Math.max(band.min * 0.3, pctDist);
+}
 
 function onMomentumCheck(product) {
   for (const pos of state.positions.values()) {
@@ -505,7 +529,16 @@ function onMomentumCheck(product) {
     if (!e9.length || r == null) continue;
     const price = priceOf(pos);
     const last2Below = closes.slice(-2).every((c) => c < e9[e9.length - 1]);
-    if (price > pos.entry && last2Below && r < 45) closePosition(pos, price, 'momentum_reversal');
+    if (price > pos.entry && last2Below && r < 45) { closePosition(pos, price, 'momentum_reversal'); continue; }
+    pos.momFactor = r < 55 || last2Below ? 0.7 : 1;                // fading momentum tightens the trail
+    if (!partialDone(pos) || price <= pos.entry) continue;
+    // Runner management after the target was banked: leave on a regime flip, or lighten up into resistance when overextended.
+    if (!state.btc.bullish) { closePosition(pos, price, 'regime_exit'); continue; }
+    const hi = Math.max(...closed.slice(-241, -1).map((c) => c.h));   // highest high of the previous ~4h = nearest resistance
+    if (!pos.resistTrimmed && r >= 75 && price >= hi * 0.995 && price <= hi * 1.002) {
+      pos.resistTrimmed = true;
+      takePartial(pos, price, R.extraPartialPct, 'resistance_partial');
+    }
   }
 }
 
