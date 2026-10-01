@@ -31,4 +31,11 @@ Save this content as `CLAUDE.md` in the root folder of your project (alongside `
 - The self-learning system must NEVER automatically alter core risk parameters or circuit breakers.
 
 ## Database Tables (Supabase)
-`portfolio`, `top_100_coins`, `trade_logs`, `market_signals`, `trade_reflections`
+`portfolio`, `top_100_coins`, `trade_logs`, `market_signals`, `trade_reflections`, `tracked_traders`
+
+## Copy Trading (Hyperliquid, paper only)
+- Sources: Hyperliquid public leaderboard + info/WebSocket API (read-only, no keys, no order/signing endpoints). Zerion (on-chain wallets) is the planned second source.
+- Win-rate floor is HARD: only traders with a verified win rate >= 75% are ever tracked; >= 80% ranks first. A "trade" is one closing order (fills grouped by order/TWAP id) net of fees.
+- Extra qualification (protects against inflated win rates): >= 30 closed trades, >= 7 days of history on >= 5 active days, profit factor >= 1.5, positive net P&L, not bot-like (<= 40 closes/day), active in the last 14 days, account >= $10k, open positions not underwater by more than 10% of the account.
+- Mirroring: entries, adds, partial exits, full exits and flips follow the leader. Size = leader's % of their account applied to our equity, capped at 30%. Skip if our price is more than 1% worse than the leader's fill, or the fill is more than 120s old (exits are never skipped for age).
+- Applies to copies: circuit breakers, shared max 3 open positions, 30% size cap, fresh-data check (10s), fees + slippage, 2h asset cooldown after a stop, hard 4% protective stop, post-mortem after every trade. Shorts are allowed for copied trades (paper, 1x, no leverage). The BTC-regime / confluence / R:R filters apply to the LLM strategy only.

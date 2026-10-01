@@ -59,6 +59,16 @@ export const config = {
     staleMs: 10_000,
     trailActivatePct: 0.015,
   }),
+  // Copy-trading selection + execution rules. The win-rate floor is hard: nobody below 75% is ever tracked.
+  copy: Object.freeze({
+    minWinRate: 0.75, preferredWinRate: 0.80,
+    windowDays: 90, minTrades: 30, minProfitFactor: 1.5,
+    minSpanDays: 7, minActiveDays: 5, maxTradesPerDay: 40,   // history must be long enough, and not bot-like (closes/day)
+    maxCandidateAccount: 5_000_000,
+    maxUnrealizedLossPct: 0.10, minAccountValue: 10_000, maxLastFillDays: 14,
+    maxTracked: 7, candidatePool: 200, reevalHours: 12,
+    maxChasePct: 0.01, stopPct: 0.04, maxFillAgeMs: 120_000, minNotional: 10,
+  }),
   scanIntervalMs: 5 * 60_000,
   confirmWindowMs: 15 * 60_000,
   maxResearchPerScan: 5,

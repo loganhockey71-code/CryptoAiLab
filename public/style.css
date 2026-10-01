@@ -16,7 +16,8 @@ body { min-height: 100vh; }
 .banner { margin: 10px 16px 0; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--amber); background: rgba(245,166,35,.1); color: var(--amber); display: flex; gap: 12px; align-items: center; }
 .banner button { margin-left: auto; }
 .hidden { display: none !important; }
-.grid { display: grid; gap: 12px; padding: 12px 16px 24px; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); grid-template-areas: "table chart" "table pos" "log learn"; }
+.grid { display: grid; gap: 12px; padding: 12px 16px 24px; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); grid-template-areas: "table chart" "table pos" "copy copy" "log learn"; }
+.copy-panel { grid-area: copy; } #copy { max-height: 380px; }
 .table-panel { grid-area: table; } .chart-panel { grid-area: chart; } .pos-panel { grid-area: pos; } .log-panel { grid-area: log; } .learn-panel { grid-area: learn; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; min-width: 0; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--line); }
@@ -40,4 +41,4 @@ tbody tr.off td { opacity: .45; }
 .item .meta { color: var(--muted); font-size: 11px; display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 2px; }
 .item .why { color: var(--muted); font-size: 12px; margin-top: 3px; }
 .empty { padding: 18px 12px; color: var(--muted); }
-@media (max-width: 1100px) { .grid { grid-template-columns: minmax(0,1fr); grid-template-areas: "chart" "pos" "table" "log" "learn"; } }
+@media (max-width: 1100px) { .grid { grid-template-columns: minmax(0,1fr); grid-template-areas: "chart" "pos" "copy" "table" "log" "learn"; } }

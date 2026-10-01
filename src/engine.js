@@ -3,6 +3,7 @@
 import { config, log, warn } from './config.js';
 import { db } from './db.js';
 import { feed, fetchCandles, loadProducts } from './exchange.js';
+import { hl } from './hyperliquid.js';
 import { refreshUniverse, restoreCooldowns, universe } from './universe.js';
 import { snapshot, aggregate, rvol as calcRvol, atr, ema, rsi, candlePattern } from './indicators.js';
 import * as src from './sources.js';
@@ -23,6 +24,7 @@ export const state = {
   decisions: [],               // newest first (decision log panel)
   reflections: [],             // newest first (AI learning feed)
   closedToday: [],             // closed trades since UTC midnight
+  copyCooldown: new Map(),     // coin -> until (2h lockout after a copied position hits its stop)
   scan: { running: false, startedAt: null, finishedAt: null, count: 0, lastError: null, progress: '' },
   sources: {},                 // name -> { tier, ok, fetchedAt, error }
   productSet: new Set(),
@@ -31,7 +33,7 @@ export const state = {
 
 /* ------------------------------------------------------------------ helpers */
 
-function logDecision(type, symbol, message, extra = {}) {
+export function logDecision(type, symbol, message, extra = {}) {
   state.decisions.unshift({ at: Date.now(), type, symbol, message, ...extra });
   if (state.decisions.length > 300) state.decisions.length = 300;
 }
@@ -48,18 +50,22 @@ function noteSource(r) {
   state.sources[r.source] = { tier: r.tier, ok: r.ok, fetchedAt: r.fetchedAt, error: r.error ?? null };
 }
 
-function priceOf(pos) { return feed.price(pos.product) ?? pos.lastPrice ?? pos.entry; }
+function priceOf(pos) {
+  if (pos.venue === 'hl') return hl.mid(pos.coin) ?? pos.lastPrice ?? pos.entry;
+  return feed.price(pos.product) ?? pos.lastPrice ?? pos.entry;
+}
+const unrealizedGross = (pos, px) => pos.qty * (pos.side === 'short' ? pos.entry - px : px - pos.entry);
 
 export function markEquity() {
   const p = state.portfolio;
   let eq = p.cash;
-  for (const pos of state.positions.values()) eq += pos.qty * priceOf(pos);
+  for (const pos of state.positions.values()) eq += pos.notional + unrealizedGross(pos, priceOf(pos));
   p.equity = eq;
   return eq;
 }
 
 let saveTimer = null;
-function persistPortfolio(now = false) {
+export function persistPortfolio(now = false) {
   const go = () => { saveTimer = null; markEquity(); return db.savePortfolio(state.portfolio); };
   if (now) { clearTimeout(saveTimer); return go(); }
   if (!saveTimer) saveTimer = setTimeout(go, 3000);
@@ -151,7 +157,7 @@ async function runScan() {
 
     const tradable = [...universe.coins.values()].filter((c) => c.tradable);
     const products = new Set(tradable.map((c) => c.product));
-    for (const pos of state.positions.values()) products.add(pos.product);
+    for (const pos of state.positions.values()) if (pos.product) products.add(pos.product);
     feed.setProducts([...products]);
 
     // BTC first so the regime gate is current before anything else is evaluated.
@@ -384,37 +390,137 @@ function onMomentumCheck(product) {
   }
 }
 
-async function closePosition(pos, price, reason) {
+// Fill price for leaving a position (long sells lower, short buys back higher) and for entering one.
+const exitFillFor = (side, px) => (side === 'short' ? px * (1 + R.slippagePct) : riskLib.exitFill(px));
+const entryFillFor = (side, px) => (side === 'short' ? px * (1 - R.slippagePct) : riskLib.entryFill(px));
+const favourable = (pos) => (pos.side === 'short' ? pos.entry / pos.highWater - 1 : pos.highWater / pos.entry - 1);
+
+export async function closePosition(pos, price, reason) {
   if (pos.closing) return;
   pos.closing = true;
   const p = state.portfolio;
-  const exitPx = riskLib.exitFill(price);
-  const proceeds = pos.qty * exitPx, feeExit = riskLib.feeOn(proceeds);
-  const finalPnl = proceeds - pos.notional - pos.fee - feeExit;
-  const finalPct = finalPnl / (pos.notional + pos.fee);
-  p.cash += proceeds - feeExit;
-  p.realized_pnl += finalPnl;
+  const exitPx = exitFillFor(pos.side, price);
+  const gross = pos.qty * (pos.side === 'short' ? pos.entry - exitPx : exitPx - pos.entry);
+  const feeExit = riskLib.feeOn(pos.qty * exitPx);
+  const legPnl = gross - pos.fee - feeExit;
+  const finalPnl = (pos.realized ?? 0) + legPnl;
+  const finalPct = finalPnl / (pos.initCost ?? (pos.notional + pos.fee));
+  p.cash += pos.notional + gross - feeExit;
+  p.realized_pnl += legPnl;
   state.positions.delete(pos.id);
   const mins = (Date.now() - pos.openedAt) / 60000;
-  const actual = `${finalPnl >= 0 ? 'Gain' : 'Loss'} of ${pct(finalPct)} (net) over ${mins.toFixed(0)} min; peak ${pct(pos.highWater / pos.entry - 1)} above entry; exit reason: ${reason}.`;
+  const actual = `${finalPnl >= 0 ? 'Gain' : 'Loss'} of ${pct(finalPct)} (net) over ${mins.toFixed(0)} min on a ${pos.side ?? 'long'}; best excursion ${pct(favourable(pos))}; exit reason: ${reason}.`;
   const trade = {
-    id: pos.id, symbol: pos.symbol, entry_price: pos.entry, exit_price: exitPx, qty: pos.qty, exit_reason: reason, final_pnl: finalPnl,
+    id: pos.id, symbol: pos.symbol, side: pos.side ?? 'long', entry_price: pos.entry, exit_price: exitPx, qty: pos.qty, exit_reason: reason, final_pnl: finalPnl,
     final_pnl_pct: finalPct, exit_time: new Date().toISOString(), entry_time: new Date(pos.openedAt).toISOString(), high_water: pos.highWater,
   };
   state.closedToday.push({ ...trade, exitAt: Date.now() });
   await db.updateTrade(pos.id, {
-    status: 'closed', exit_time: trade.exit_time, exit_price: exitPx, exit_reason: reason, fee_exit: feeExit,
-    gross_pnl: proceeds - pos.notional, final_pnl: finalPnl, final_pnl_pct: finalPct, actual_result: actual, high_water: pos.highWater, trailing_stop: pos.trailing,
+    status: 'closed', exit_time: trade.exit_time, exit_price: exitPx, exit_reason: reason, fee_exit: feeExit, realized_partial: pos.realized ?? 0,
+    gross_pnl: gross, final_pnl: finalPnl, final_pnl_pct: finalPct, actual_result: actual, high_water: pos.highWater, trailing_stop: pos.trailing,
   });
-  logDecision('exit', pos.symbol, `${reason}: net P&L $${finalPnl.toFixed(2)} (${pct(finalPct)})`);
+  logDecision('exit', pos.symbol, `${reason}: net P&L $${finalPnl.toFixed(2)} (${pct(finalPct)})${pos.copy ? ` [copy of ${pos.copy.trader.slice(0, 8)}]` : ''}`);
   if (reason === 'stop_loss') {
     const until = Date.now() + R.assetCooldownHours * 3600_000;
-    const coin = [...universe.coins.values()].find((c) => c.symbol === pos.symbol);
-    if (coin) { coin.cooldownUntil = until; db.setCooldown(coin.id, new Date(until).toISOString()); }
+    if (pos.venue === 'hl') state.copyCooldown.set(pos.coin, until);
+    else {
+      const coin = [...universe.coins.values()].find((c) => c.symbol === pos.symbol);
+      if (coin) { coin.cooldownUntil = until; db.setCooldown(coin.id, new Date(until).toISOString()); }
+    }
   }
   checkBreakers();
   persistPortfolio(true);
   reflect(pos, trade, actual).catch((e) => warn('reflection failed', e.message));
+}
+
+/** Partial exit (a copied leader scaled out). The remainder stays open; P&L is realised pro-rata. */
+export async function reducePosition(pos, fraction, price, reason) {
+  if (pos.closing) return;
+  if (fraction >= 0.995) return closePosition(pos, price, reason);
+  const p = state.portfolio;
+  const qtyC = pos.qty * fraction, exitPx = exitFillFor(pos.side, price);
+  const gross = qtyC * (pos.side === 'short' ? pos.entry - exitPx : exitPx - pos.entry);
+  const feeExit = riskLib.feeOn(qtyC * exitPx), feeShare = pos.fee * fraction, notionalC = pos.notional * fraction;
+  const leg = gross - feeShare - feeExit;
+  p.cash += notionalC + gross - feeExit;
+  p.realized_pnl += leg;
+  pos.realized = (pos.realized ?? 0) + leg;
+  pos.qty -= qtyC; pos.notional -= notionalC; pos.fee -= feeShare;
+  await db.updateTrade(pos.id, { qty: pos.qty, notional: pos.notional, fee_entry: pos.fee, realized_partial: pos.realized });
+  logDecision('exit', pos.symbol, `${reason}: reduced ${(fraction * 100).toFixed(0)}% of the position (leg P&L $${leg.toFixed(2)})`);
+  persistPortfolio(true);
+}
+
+/**
+ * Open a PAPER position that mirrors a tracked trader. Every deterministic safety gate that makes sense for a copied trade applies:
+ * circuit breakers, the shared max-3-positions cap, the 30%-of-equity size cap, asset cooldown, fresh-data check, fees + slippage and the hard stop.
+ * (The BTC-regime / confluence / R:R filters belong to the LLM strategy and do not apply: the trader's edge is the signal here.)
+ */
+export async function openCopyPosition(o) {
+  const p = state.portfolio, now = Date.now();
+  const gate = riskLib.tradingGate(p, now);
+  if (!gate.allowed) return { ok: false, reason: `circuit breaker: ${gate.reason}` };
+  if (state.positions.size + state.pending.size >= R.maxOpenPositions) return { ok: false, reason: `already ${state.positions.size + state.pending.size} open positions/pending signals (max ${R.maxOpenPositions})` };
+  if ([...state.positions.values()].some((x) => x.venue === 'hl' && x.coin === o.coin)) return { ok: false, reason: `already copying a ${o.coin} position` };
+  const cd = state.copyCooldown.get(o.coin);
+  if (cd && cd > now) return { ok: false, reason: `${o.coin} cooldown after stop-loss until ${new Date(cd).toISOString()}` };
+  if (hl.midAgeMs() > R.staleMs) return { ok: false, reason: 'Hyperliquid price feed not verified fresh (>10s)' };
+  const equity = markEquity();
+  let notional = Math.min(o.notional, R.maxPositionPct * equity);
+  if (notional * (1 + R.feePct) > p.cash) notional = p.cash / (1 + R.feePct);
+  if (notional < config.copy.minNotional) return { ok: false, reason: `position would be only $${notional.toFixed(2)} (below $${config.copy.minNotional} minimum / insufficient cash)` };
+  const entryPx = entryFillFor(o.side, o.price);
+  const qty = notional / entryPx, fee = riskLib.feeOn(notional);
+  const stop = o.side === 'short' ? entryPx * (1 + config.copy.stopPct) : entryPx * (1 - config.copy.stopPct);
+  const why = `Mirroring ${o.trader.slice(0, 10)}… (${(o.winRate * 100).toFixed(0)}% win rate, ${o.tier}): they went ${o.side} ${o.coin} at ${o.leaderPx}; we filled at ${entryPx.toPrecision(6)} (${((entryPx / o.leaderPx - 1) * 100).toFixed(2)}% vs theirs, ${((now - o.leaderTime) / 1000).toFixed(1)}s later).`;
+  const row = await db.insertTrade({
+    symbol: o.coin, signal_id: o.signalId ?? null, status: 'open', side: o.side, entry_price: entryPx, qty, notional, target_price: null, stop_price: stop,
+    high_water: entryPx, rr: null, confluence_score: null, rationale: why, fee_entry: fee, source: 'copy_hyperliquid', source_trader: o.trader,
+    leader_fill_price: o.leaderPx, leader_fill_time: new Date(o.leaderTime).toISOString(), leader_size: o.leaderSize,
+    prediction: { mirror: true, k: o.k, trader: o.trader, win_rate: o.winRate, tier: o.tier }, evidence_used: why,
+    expected_direction: o.side === 'short' ? 'down' : 'up', confidence: o.winRate * 100, market_regime: `BTC 1h ${state.btc.regime}`,
+  });
+  const id = row?.id ?? `mem-copy-${now}`;
+  p.cash -= notional + fee;
+  const pos = {
+    id, venue: 'hl', coin: o.coin, symbol: o.coin, side: o.side, qty, entry: entryPx, notional, fee, initCost: notional + fee, realized: 0,
+    stop, target: null, trailing: null, highWater: entryPx, openedAt: now, rationale: why, lastPrice: o.price, leaderSize: o.leaderSize,
+    copy: { trader: o.trader, winRate: o.winRate, tier: o.tier, leaderPx: o.leaderPx, leaderTime: o.leaderTime, k: o.k, latencyMs: now - o.leaderTime },
+    ctx: { conf: { notes: {}, technical: 0, rvol: 0, research: 0, derivatives: 0, total: 0 }, sig: { evidenceSummary: why, supporting: [], conflicting: [], confidence: o.winRate * 100 }, patterns: {}, btc: state.btc.regime },
+  };
+  state.positions.set(id, pos);
+  persistPortfolio(true);
+  logDecision('entered', o.coin, `PAPER ${o.side.toUpperCase()} ${qty.toPrecision(5)} @ ${entryPx.toPrecision(6)} ($${notional.toFixed(0)}, ${pct(notional / equity)} of equity) copying ${o.trader.slice(0, 8)}; hard stop ${stop.toPrecision(6)}`);
+  return { ok: true, pos };
+}
+
+/** The leader added to their position: add proportionally (same caps, weighted-average entry). */
+export async function addToCopyPosition(pos, addNotional, price) {
+  const p = state.portfolio;
+  const gate = riskLib.tradingGate(p);
+  if (!gate.allowed) return { ok: false, reason: `circuit breaker: ${gate.reason}` };
+  if (hl.midAgeMs() > R.staleMs) return { ok: false, reason: 'Hyperliquid price feed not verified fresh (>10s)' };
+  const equity = markEquity();
+  let add = Math.min(addNotional, R.maxPositionPct * equity - pos.notional);
+  if (add * (1 + R.feePct) > p.cash) add = p.cash / (1 + R.feePct);
+  if (add < config.copy.minNotional) return { ok: false, reason: 'add would be below minimum size or exceed the 30% cap' };
+  const px = entryFillFor(pos.side, price), q = add / px, fee = riskLib.feeOn(add);
+  p.cash -= add + fee;
+  pos.entry = (pos.qty * pos.entry + q * px) / (pos.qty + q);
+  pos.qty += q; pos.notional += add; pos.fee += fee; pos.initCost += add + fee;
+  pos.stop = pos.side === 'short' ? pos.entry * (1 + config.copy.stopPct) : pos.entry * (1 - config.copy.stopPct);
+  await db.updateTrade(pos.id, { qty: pos.qty, notional: pos.notional, entry_price: pos.entry, fee_entry: pos.fee, stop_price: pos.stop });
+  logDecision('entered', pos.symbol, `added $${add.toFixed(0)} to the copied ${pos.side} (leader added); new avg entry ${pos.entry.toPrecision(6)}`);
+  persistPortfolio(true);
+  return { ok: true };
+}
+
+/** Price update for a Hyperliquid-venue position: track the best price and enforce the hard stop. */
+export function onHlPrice(pos, price) {
+  if (pos.closing) return;
+  pos.lastPrice = price;
+  if (pos.side === 'short' ? price < pos.highWater : price > pos.highWater) pos.highWater = price;
+  if (pos.side === 'short' ? price >= pos.stop : price <= pos.stop) closePosition(pos, price, 'stop_loss');
 }
 
 /* ------------------------------------------------------------------ breakers */
@@ -468,9 +574,17 @@ export function clearManualReview() {
 async function reflect(pos, trade, actual) {
   const win = trade.final_pnl > 0;
   const lessons = state.reflections.slice(0, 5).map((l) => ({ outcome: l.outcome, symbol: l.symbol, lesson: l.lesson }));
-  const ctx = { confluence: pos.ctx.conf, researchSummary: pos.ctx.sig.evidenceSummary, supporting: pos.ctx.sig.supporting, conflicting: pos.ctx.sig.conflicting, patterns: pos.ctx.patterns, sentiment: pos.ctx.sentiment, btcRegime: pos.ctx.btc, entryRationale: pos.rationale };
+  const ctx = { copiedTrader: pos.copy ?? null, side: pos.side ?? 'long', confluence: pos.ctx.conf, researchSummary: pos.ctx.sig.evidenceSummary, supporting: pos.ctx.sig.supporting, conflicting: pos.ctx.sig.conflicting, patterns: pos.ctx.patterns, sentiment: pos.ctx.sentiment, btcRegime: pos.ctx.btc, entryRationale: pos.rationale };
   let r = null;
   if (llmAvailable()) r = await reflectOnTrade({ ...trade, holdMinutes: +((Date.now() - pos.openedAt) / 60000).toFixed(1) }, ctx, lessons);
+  if (!r && pos.copy) {
+    r = {
+      actual_result: actual, indicators_correct: win ? [`trader's ${pos.side} call on ${pos.coin} worked`] : [], indicators_wrong: win ? [] : [`trader's ${pos.side} call on ${pos.coin} did not work out (exit: ${trade.exit_reason})`],
+      news_impact: { mattered: [], irrelevant: [] },
+      lesson: `Copied ${pos.copy.trader.slice(0, 8)} (${(pos.copy.winRate * 100).toFixed(0)}% win rate) ${pos.side} ${pos.coin}: ${win ? 'won' : 'lost'} via ${trade.exit_reason}; entry was ${((pos.entry / pos.copy.leaderPx - 1) * 100).toFixed(2)}% vs the leader after ${(pos.copy.latencyMs / 1000).toFixed(1)}s. (Auto-generated: LLM reflection unavailable.)`,
+      patterns: [`copy:${trade.exit_reason}`, win ? 'copy win' : 'copy loss'],
+    };
+  }
   if (!r) {
     // Deterministic fallback so every trade still gets a post-mortem.
     const c = pos.ctx.conf, strong = [], weak = [];
@@ -486,10 +600,10 @@ async function reflect(pos, trade, actual) {
   }
   const row = {
     trade_id: pos.id.startsWith('mem-') ? null : pos.id, symbol: pos.symbol, outcome: win ? 'win' : 'loss',
-    prediction: `Expected up toward ${pos.target.toPrecision(6)} with stop ${pos.stop.toPrecision(6)} (confidence ${pos.ctx.sig.confidence.toFixed(0)}%)`,
-    evidence_used: pos.ctx.sig.evidenceSummary, expected_direction: 'up', confidence: pos.ctx.sig.confidence,
+    prediction: pos.copy ? `Mirror ${pos.copy.trader.slice(0, 10)}'s ${pos.side} on ${pos.coin} (their win rate ${(pos.copy.winRate * 100).toFixed(0)}%), hard stop ${pos.stop.toPrecision(6)}` : `Expected up toward ${pos.target.toPrecision(6)} with stop ${pos.stop.toPrecision(6)} (confidence ${pos.ctx.sig.confidence.toFixed(0)}%)`,
+    evidence_used: pos.ctx.sig.evidenceSummary, expected_direction: pos.side === 'short' ? 'down' : 'up', confidence: pos.ctx.sig.confidence,
     actual_result: r.actual_result || actual, indicators_correct: r.indicators_correct, indicators_wrong: r.indicators_wrong, news_impact: r.news_impact,
-    candle_pattern: `5m: ${pos.ctx.patterns?.['5m']}`, market_regime: `BTC 1h ${pos.ctx.btc}`, final_pnl: trade.final_pnl, lesson: r.lesson, patterns: r.patterns,
+    candle_pattern: pos.copy ? `copy of ${pos.copy.trader.slice(0, 8)}` : `5m: ${pos.ctx.patterns?.['5m']}`, market_regime: `BTC 1h ${pos.ctx.btc}`, final_pnl: trade.final_pnl, lesson: r.lesson, patterns: r.patterns,
   };
   const saved = row.trade_id ? await db.insertReflection(row) : null;
   state.reflections.unshift({ ...(saved ?? row), created_at: saved?.created_at ?? new Date().toISOString() });
@@ -506,6 +620,7 @@ async function housekeeping() {
   }
   // Stale-price fallback for open positions: never leave a position unmonitored.
   for (const pos of state.positions.values()) {
+    if (pos.venue === 'hl') continue;
     if (feed.tickAgeMs(pos.product) > R.staleMs && now - (pos.lastRest ?? 0) > 5000) {
       pos.lastRest = now;
       const fp = await feed.freshPrice(pos.product, R.staleMs);
@@ -543,18 +658,23 @@ export async function start() {
   state.closedToday = (today ?? []).map((t) => ({ ...t, final_pnl: Number(t.final_pnl), exitAt: new Date(t.exit_time).getTime() }));
 
   for (const t of open ?? []) {
+    const isCopy = String(t.source ?? '').startsWith('copy_');
     state.positions.set(t.id, {
-      id: t.id, symbol: t.symbol, product: `${t.symbol}-USD`, signalId: t.signal_id, qty: Number(t.qty), entry: Number(t.entry_price), notional: Number(t.notional),
-      fee: Number(t.fee_entry), stop: Number(t.stop_price), target: Number(t.target_price), trailing: t.trailing_stop ? Number(t.trailing_stop) : null,
+      id: t.id, symbol: t.symbol, signalId: t.signal_id, side: t.side ?? 'long', qty: Number(t.qty), entry: Number(t.entry_price), notional: Number(t.notional),
+      fee: Number(t.fee_entry), initCost: Number(t.notional) + Number(t.fee_entry), realized: Number(t.realized_partial ?? 0),
+      stop: Number(t.stop_price), target: t.target_price ? Number(t.target_price) : null, trailing: t.trailing_stop ? Number(t.trailing_stop) : null,
       highWater: Number(t.high_water ?? t.entry_price), openedAt: new Date(t.entry_time).getTime(), rationale: t.rationale, lastPrice: null,
-      ctx: { conf: { notes: {}, technical: 0, rvol: 0, research: 0, derivatives: 0, total: Number(t.confluence_score) }, sig: { evidenceSummary: t.evidence_used ?? '', supporting: [], conflicting: [], confidence: Number(t.confidence ?? 0) }, patterns: {}, btc: t.market_regime },
+      ...(isCopy
+        ? { venue: 'hl', coin: t.symbol, leaderSize: Number(t.leader_size ?? 0), copy: { trader: t.source_trader, winRate: Number(t.confidence ?? 0) / 100, tier: t.prediction?.tier ?? 'minimum', leaderPx: Number(t.leader_fill_price), leaderTime: new Date(t.leader_fill_time).getTime(), k: Number(t.prediction?.k ?? 0), latencyMs: 0 } }
+        : { product: `${t.symbol}-USD` }),
+      ctx: { conf: { notes: {}, technical: 0, rvol: 0, research: 0, derivatives: 0, total: Number(t.confluence_score ?? 0) }, sig: { evidenceSummary: t.evidence_used ?? '', supporting: [], conflicting: [], confidence: Number(t.confidence ?? 0) }, patterns: {}, btc: t.market_regime },
     });
   }
   if (state.positions.size) log(`Resumed ${state.positions.size} open paper position(s) from Supabase`);
 
   feed.on('tick', onTick);
   feed.on('candle', (product, candle) => { onCandleClosed(product, candle); onMomentumCheck(product); });
-  feed.setProducts([...state.positions.values()].map((p) => p.product));
+  feed.setProducts([...state.positions.values()].map((p) => p.product).filter(Boolean));
   feed.start();
   setInterval(() => housekeeping().catch((e) => warn('housekeeping', e.message)), 1000);
   setInterval(() => persistPortfolio(), 15_000);
@@ -595,9 +715,13 @@ export function snapshotForUi() {
     };
   });
   const positions = [...state.positions.values()].map((x) => {
-    const px = priceOf(x), proceeds = x.qty * riskLib.exitFill(px);
-    const net = proceeds - riskLib.feeOn(proceeds) - x.notional - x.fee;
-    return { id: x.id, symbol: x.symbol, entry: x.entry, price: px, target: x.target, stop: x.stop, trailing: x.trailing, rr: (x.target - x.entry) / (x.entry - x.stop), qty: x.qty, notional: x.notional, pnl: net, pnlPct: net / (x.notional + x.fee), openedAt: x.openedAt, why: x.rationale };
+    const px = priceOf(x), ex = exitFillFor(x.side, px);
+    const net = (x.realized ?? 0) + x.qty * (x.side === 'short' ? x.entry - ex : ex - x.entry) - riskLib.feeOn(x.qty * ex) - x.fee;
+    return {
+      id: x.id, symbol: x.symbol, side: x.side ?? 'long', source: x.venue === 'hl' ? 'copy' : 'strategy', trader: x.copy?.trader ?? null, traderWinRate: x.copy?.winRate ?? null,
+      leaderPx: x.copy?.leaderPx ?? null, entry: x.entry, price: px, target: x.target, stop: x.stop, trailing: x.trailing,
+      rr: x.target ? (x.target - x.entry) / (x.entry - x.stop) : null, qty: x.qty, notional: x.notional, pnl: net, pnlPct: net / (x.initCost ?? (x.notional + x.fee)), openedAt: x.openedAt, why: x.rationale,
+    };
   });
   return {
     now, paper: true,

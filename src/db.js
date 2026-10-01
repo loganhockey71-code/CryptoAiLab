@@ -35,6 +35,9 @@ export const db = {
     : null,
   setCooldown: (id, until) => run('setCooldown', (c) => c.from('top_100_coins').update({ cooldown_until: until }).eq('coingecko_id', id)),
 
+  upsertTraders: (rows) => rows.length ? run('upsertTraders', (c) => c.from('tracked_traders').upsert(rows, { onConflict: 'address' })) : null,
+  loadTraders: () => run('loadTraders', (c) => c.from('tracked_traders').select('*')),
+
   insertSignal: (s) => run('insertSignal', (c) => c.from('market_signals').insert(s).select().single()),
   updateSignal: (id, patch) => run('updateSignal', (c) => c.from('market_signals').update(patch).eq('id', id)),
   recentSignals: (n = 100) => run('recentSignals', (c) => c.from('market_signals').select('*').order('created_at', { ascending: false }).limit(n)),
