@@ -27,6 +27,7 @@ export const state = {
   reflections: [],             // newest first (AI learning feed)
   closedToday: [],             // closed trades since UTC midnight
   recentClosed: [],            // newest first, feeds the Trade History panel
+  closedTotal: 0,              // every trade ever closed (top-bar counter; recentClosed is capped at 200)
   trending: new Set(),         // CoinGecko trending ids, refreshed every scan
   ctx: null,                   // latest news/macro/politics context, reused by the fast mover scan
   newsFeed: { at: null, feeds: [], items: [] },   // everything the app read this scan (News & Politics panel)
@@ -124,6 +125,7 @@ async function analyzeCoin(coin) {
     cs.snaps = { '1d': snapshot(d1), '4h': snapshot(aggregate(h1, 4 * 3600)), '1h': snapshot(h1), '15m': snapshot(m15), '5m': snapshot(m5) };
     cs.rvol = calcRvol(m15);
     cs.atr15 = atr(m15);
+    cs.atr1h = atr(h1);
     cs.patterns = { '5m': candlePattern(m5), '1h': candlePattern(h1) };
     cs.priceUp = m15.length > 2 && m15[m15.length - 1].c > m15[m15.length - 3].c;
     cs.series5m = m5.slice(-30).map((c) => ({ t: c.t, c: c.c }));
@@ -457,13 +459,13 @@ async function tryEnter(p, confirmation) {
     const row = await db.insertTrade({
       symbol: p.symbol, signal_id: p.id.startsWith('mem-') ? null : p.id, status: 'open', entry_price: entryPx, qty, notional,
       target_price: shaped.target, stop_price: stopPx, high_water: entryPx, rr: shaped.rr, confluence_score: p.conf.total, rationale: why,
-      fee_entry: fee, entry_trigger: p.trigger?.kind ?? 'scan', prediction: { expected_direction: 'up', target: p.sig.target, stop: p.sig.stop, confirmation, trigger: p.trigger ?? null }, evidence_used: `${p.sig.evidenceSummary} | notes: ${JSON.stringify(p.conf.notes)}`,
+      fee_entry: fee, entry_trigger: p.trigger?.kind ?? 'scan', prediction: { expected_direction: 'up', target: p.sig.target, stop: p.sig.stop, timeframe_hours: p.sig.timeframeHours ?? null, confirmation, trigger: p.trigger ?? null }, evidence_used: `${p.sig.evidenceSummary} | notes: ${JSON.stringify(p.conf.notes)}`,
       expected_direction: 'up', confidence: p.sig.confidence, candle_pattern: `5m: ${p.ctx.patterns?.['5m']}; 1h: ${p.ctx.patterns?.['1h']}; 1m confirm close ${confirmation.c}`, market_regime: `BTC 1h ${btc.regime}`,
     });
     const id = row?.id ?? `mem-trade-${Date.now()}`;
     state.portfolio.cash -= notional + fee;
     state.positions.set(id, {
-      id, symbol: p.symbol, product: p.product, signalId: p.id, qty, entry: entryPx, notional, fee, stop: stopPx, stopPct: fin.stopPct, riskUsd: fin.riskUsd, target: shaped.target, band: shaped.band, partialTaken: false,
+      id, symbol: p.symbol, product: p.product, signalId: p.id, qty, entry: entryPx, notional, fee, stop: stopPx, stopPct: fin.stopPct, riskUsd: fin.riskUsd, target: shaped.target, band: shaped.band, partialTaken: false, horizonHours: clampN(p.sig.timeframeHours ?? 24, 1, 48),
       trailing: null, highWater: entryPx, openedAt: Date.now(), rationale: why, lastPrice: live, sizePct, trigger: p.trigger ?? { kind: 'scan', reasons: [] },
       ctx: { conf: p.conf, sig: p.sig, patterns: p.ctx.patterns, sentiment: p.ctx.sentiment, btc: btc.regime, confirmation },
     });
@@ -499,6 +501,8 @@ function onTick(product, price) {
 }
 const clampN = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
+// A position meant to be held for more than ~6h is a swing hold: 1-minute noise must never close it. Missing horizon counts as a swing (hold by default).
+const isSwing = (pos) => (pos.horizonHours ?? 24) > 6;
 const partialDone = (pos) => pos.partialTaken ?? (pos.realized ?? 0) !== 0;
 const bandOf = (pos) => (pos.band ??= riskLib.stopBand(pos.symbol, state.coins.get(pos.symbol)?.coin?.rank ?? 100));
 
@@ -517,7 +521,7 @@ function takePartial(pos, price, fraction, reason) {
  */
 function chandelierStop(pos, price) {
   const band = bandOf(pos), cs = state.coins.get(pos.symbol);
-  const atr = cs?.atr15 > 0 ? cs.atr15 : pos.entry * band.min;
+  const atr = (isSwing(pos) && cs?.atr1h > 0 ? cs.atr1h : cs?.atr15) || pos.entry * band.min;   // swing holds trail on the 1h ATR so ordinary hourly swings do not shake them out
   const riskDist = pos.entry * (pos.stopPct ?? band.max);
   const profitR = (pos.highWater - pos.entry) / riskDist;
   let k = profitR >= 3 ? 1.5 : profitR >= 2 ? 2.0 : profitR >= 1 ? 2.5 : 3.0;
@@ -540,11 +544,18 @@ function onMomentumCheck(product) {
     const [c3, c2, c1] = closed.slice(-3);
     const lowerLows = c1.l < c2.l && c2.l < c3.l, volDeclining = c1.v < c2.v && c2.v < c3.v;
     const e21 = ema(closes, 21), emaBreak = e21.length && closes.slice(-2).every((c) => c < e21[e21.length - 1]) && r < 45;
-    if (price > pos.entry && ((lowerLows && volDeclining) || emaBreak)) { closePosition(pos, price, 'momentum_reversal'); continue; }
-    pos.momFactor = r < 55 || last2Below ? 0.7 : 1;                // fading momentum tightens the trail
+    const swing = isSwing(pos), cs1h = state.coins.get(pos.symbol)?.snaps?.['1h'];
+    if (swing) {
+      // Swing hold (1-2 days): ignore 1-minute noise entirely. Leave on a broken 1h trend, otherwise let the stop / Chandelier trail decide.
+      pos.momFactor = 1;
+      if (price > pos.entry && Date.now() - pos.openedAt > 3600_000 && cs1h && !cs1h.trendUp && !cs1h.aboveEma20) { closePosition(pos, price, 'trend_break'); continue; }
+    } else {
+      if (price > pos.entry && ((lowerLows && volDeclining) || emaBreak)) { closePosition(pos, price, 'momentum_reversal'); continue; }
+      pos.momFactor = r < 55 || last2Below ? 0.7 : 1;              // fading momentum tightens the trail
+    }
     if (!partialDone(pos) || price <= pos.entry) continue;
-    // Runner management after the target was banked: leave on a regime flip, or lighten up into resistance when overextended.
-    if (!state.btc.bullish) { closePosition(pos, price, 'regime_exit'); continue; }
+    // Runner management after the target was banked: leave on a regime flip (short holds only), or lighten up into resistance when overextended.
+    if (!swing && !state.btc.bullish) { closePosition(pos, price, 'regime_exit'); continue; }
     const hi = Math.max(...closed.slice(-241, -1).map((c) => c.h));   // highest high of the previous ~4h = nearest resistance
     if (!pos.resistTrimmed && r >= 75 && price >= hi * 0.995 && price <= hi * 1.002) {
       pos.resistTrimmed = true;
@@ -625,6 +636,7 @@ export async function closePosition(pos, price, reason) {
   recordExit(pos, { price: exitPx, sizeUsd: pos.qty * exitPx, pnl: legPnl, reason, final: true });
   state.closedToday.push({ ...trade, exitAt: Date.now() });
   recordHistory(pos, trade, pos.initCost ?? (pos.notional + pos.fee));
+  state.closedTotal++;
   if (pos.copy) noteTraderResult(pos.copy.trader);
   await db.updateTrade(pos.id, {
     status: 'closed', exit_time: trade.exit_time, exit_price: exitPx, exit_reason: reason, fee_exit: feeExit, realized_partial: pos.realized ?? 0,
@@ -921,6 +933,7 @@ export async function start() {
   ]);
   state.recentClosed = (recent ?? []).filter((t) => t.status === 'closed' && t.exit_time).map(historyFromDb).sort((a, b) => b.closedAt - a.closedAt).slice(0, 200);
   state.reflections = reflections ?? [];
+  state.closedTotal = (await db.countClosedTrades()) ?? state.recentClosed.length;
   for (const a of new Set(state.recentClosed.map((t) => t.trader).filter(Boolean))) {
     const s = traderStatus(a);
     if (s.losses >= 2) state.rescore.add(a);
@@ -942,7 +955,7 @@ export async function start() {
       highWater: Number(t.high_water ?? t.entry_price), openedAt: new Date(t.entry_time).getTime(), rationale: t.rationale, lastPrice: null,
       ...(isCopy
         ? { venue: t.source === 'copy_zerion' ? 'onchain' : 'hl', extra: t.prediction ?? null, coin: t.source === 'copy_zerion' ? (t.prediction?.assetKey ?? t.symbol) : t.symbol, leaderSize: Number(t.leader_size ?? 0), copy: { trader: t.source_trader, winRate: Number(t.confidence ?? 0) / 100, tier: t.prediction?.tier ?? 'minimum', leaderPx: Number(t.leader_fill_price), leaderTime: new Date(t.leader_fill_time).getTime(), k: Number(t.prediction?.k ?? 0), latencyMs: 0 } }
-        : { product: `${t.symbol}-USD`, trigger: { kind: t.entry_trigger ?? 'scan', reasons: t.prediction?.trigger?.reasons ?? [] } }),
+        : { product: `${t.symbol}-USD`, horizonHours: clampN(Number(t.prediction?.timeframe_hours) || 24, 1, 48), trigger: { kind: t.entry_trigger ?? 'scan', reasons: t.prediction?.trigger?.reasons ?? [] } }),
       ctx: { conf: { notes: {}, technical: 0, rvol: 0, research: 0, derivatives: 0, total: Number(t.confluence_score ?? 0) }, sig: { evidenceSummary: t.evidence_used ?? '', supporting: [], conflicting: [], confidence: Number(t.confidence ?? 0) }, patterns: {}, btc: t.market_regime },
     });
   }
@@ -1006,6 +1019,7 @@ export function snapshotForUi() {
     portfolio: { ...p, equity, dailyPnlPct: equity / p.daily_start_equity - 1, gate: riskLib.tradingGate(p) },
     btc: state.btc, scan: state.scan, health: dataHealth(), rows, positions,
     history: historySummary(),
+    tradeCount: state.closedTotal,
     newsFeed: state.newsFeed,
     decisions: state.decisions.slice(0, 100), reflections: state.reflections.slice(0, 40),
     pending: [...state.pending.values()].map((x) => ({ symbol: x.symbol, refPrice: x.refPrice, createdAt: x.createdAt, score: x.conf.total })),

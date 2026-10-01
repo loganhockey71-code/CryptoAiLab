@@ -48,6 +48,16 @@ export const db = {
   recentTrades: (n = 100) => run('recentTrades', (c) => c.from('trade_logs').select('*').order('entry_time', { ascending: false }).limit(n)),
   closedTradesSince: (iso) => run('closedTradesSince', (c) => c.from('trade_logs').select('*').eq('status', 'closed').gte('exit_time', iso).order('exit_time')),
 
+  /** Total closed trades ever (not capped like the in-memory history). */
+  countClosedTrades: async () => {
+    if (!client) return null;
+    try {
+      const { count, error } = await client.from('trade_logs').select('id', { count: 'exact', head: true }).eq('status', 'closed');
+      if (error) { warn('db countClosedTrades:', error.message); return null; }
+      return count;
+    } catch (e) { warn('db countClosedTrades threw:', e.message); return null; }
+  },
+
   insertExitEvent: (e) => run('insertExitEvent', (c) => c.from('trade_exit_events').insert(e)),
 
   insertReflection: (r) => run('insertReflection', (c) => c.from('trade_reflections').insert(r).select().single()),
