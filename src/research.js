@@ -1,9 +1,9 @@
 // THE RESEARCH BRAIN: asynchronous LLM that outputs structured JSON only. It never places orders.
 import { config, warn } from './config.js';
 
-const { gemini, openrouter, nvidia, custom, customUrl, groq, kilo, aiGateway } = config.keys;
+const { gemini, openrouter, nvidia, custom, customUrl, groq, ollama, kilo, aiGateway } = config.keys;
 /** A key is configured. This says nothing about whether the providers still have quota: see llmUsable(). */
-export const llmAvailable = () => !!(nvidia || (custom && customUrl) || groq || gemini || openrouter || kilo || aiGateway);
+export const llmAvailable = () => !!(nvidia || (custom && customUrl) || groq || ollama || gemini || openrouter || kilo || aiGateway);
 
 /** HTTP error from a provider, keeping the status, body and Retry-After so the failure can be classified (message format unchanged). */
 class ApiError extends Error {
@@ -144,14 +144,15 @@ async function refreshOpenRouterModels() {
   } catch (e) { warn('OpenRouter model list unavailable, keeping the previous list:', e.message); }
 }
 const zeroPrice = (m) => Number(m.pricing?.input ?? m.pricing?.prompt) === 0 && Number(m.pricing?.output ?? m.pricing?.completion) === 0;
-let kiloModels = [], vercelModels = [];
+let kiloModels = [], vercelModels = [], ollamaModels = ollama ? config.models.ollama : [];
 async function refreshGatewayLists() {
   const get = async (url) => { const r = await fetch(url, { signal: AbortSignal.timeout(20_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); return (await r.json()).data ?? []; };
+  if (ollama) { try { const have = new Set((await get('https://ollama.com/v1/models')).map((m) => m.id)); const ok = config.models.ollama.filter((id) => have.has(id)); if (ok.length) ollamaModels = ok; warn(`Ollama Cloud models: ${ollamaModels.join(', ')}`); } catch (e) { warn('Ollama model list unavailable, using the configured list:', e.message); } }
   if (kilo) { try { kiloModels = pickByPredicate(await get('https://api.kilo.ai/api/gateway/models'), (m) => m.isFree === true && zeroPrice(m) && m.id !== 'openrouter/free' && !/^kilo-auto|^stealth\//.test(m.id)); warn(`Kilo free models: ${kiloModels.length}`); } catch (e) { warn('Kilo model list unavailable:', e.message); } }
   if (aiGateway) { try { vercelModels = pickByPredicate(await get('https://ai-gateway.vercel.sh/v1/models'), zeroPrice); warn(`Vercel AI Gateway zero-price models: ${vercelModels.length}`); } catch (e) { warn('Vercel AI Gateway model list unavailable:', e.message); } }
 }
 if (openrouter) { refreshOpenRouterModels(); setInterval(refreshOpenRouterModels, L.openrouterRefreshMs).unref(); }
-if (kilo || aiGateway) { refreshGatewayLists(); setInterval(refreshGatewayLists, L.openrouterRefreshMs).unref(); }
+if (kilo || aiGateway || ollama) { refreshGatewayLists(); setInterval(refreshGatewayLists, L.openrouterRefreshMs).unref(); }
 if (openrouter && !isFreeId(config.models.openrouter)) warn(`OPENROUTER_MODEL=${config.models.openrouter} is not a free model and will NOT be used (free ":free" models only).`);
 /** The model chain, in order: NVIDIA NIM (primary), an optional custom OpenAI-compatible endpoint, every Gemini model (each has its OWN daily quota), then every free OpenRouter model. */
 const chain = () => [
@@ -159,6 +160,7 @@ const chain = () => [
   ...(custom && customUrl ? [['custom', callCustom]] : []),
   ...(groq ? config.models.groq.map((id) => [`groq:${id}`, (p) => callCompat('groq', 'https://api.groq.com/openai/v1', groq, id, p)]) : []),
   ...(gemini ? config.models.gemini.map((m) => [`gemini:${m}`, (p) => callGemini(p, m)]) : []),
+  ...(ollama ? ollamaModels.map((id) => [`ollama:${id}`, (p) => callCompat('ollama', 'https://ollama.com/v1', ollama, id, p)]) : []),
   ...(openrouter ? orModels.map((id) => [`openrouter:${id}`, (p) => callOpenRouter(p, id)]) : []),
   ...(kilo ? kiloModels.map((id) => [`kilo:${id}`, (p) => callCompat('kilo', 'https://api.kilo.ai/api/gateway', kilo, id, p)]) : []),
   ...(aiGateway ? vercelModels.map((id) => [`vercel:${id}`, (p) => callCompat('vercel', 'https://ai-gateway.vercel.sh/v1', aiGateway, id, p)]) : []),
@@ -205,7 +207,7 @@ export function classifyUnrecoverable(e) {
   if (e.status === 402) return { kind: 'quota', until: now + L.quotaFallbackMs };   // payment required / credits exhausted: stays out until re-probed
   if (e.status !== 429) return null;
   const waitMs = resetMsFromError(e);
-  const daily = /per.?day|daily|free-models-per-day/i.test(text) || (waitMs != null && waitMs > 15 * 60_000);
+  const daily = /per.?day|daily|free-models-per-day|usage limit|weekly|hourly|monthly/i.test(text) || (waitMs != null && waitMs > 15 * 60_000);
   if (daily) return { kind: 'quota', until: now + Math.min(L.maxDownMs, waitMs ?? (/openrouter/i.test(e.message) ? nextUtcMidnight() - now : L.quotaFallbackMs)) };
   return { kind: 'rate', until: now + Math.min(15 * 60_000, (waitMs ?? L.rateFallbackMs) + 1000) };
 }
@@ -214,7 +216,7 @@ function markDown(name, c, e) {
   const h = hs(name);
   h.downUntil = c.until; h.kind = c.kind; h.reason = e.message.replace(/\s+/g, ' ').slice(0, 140); h.wasted++; h.outages++;
   const group = name.split(':')[0];
-  if (c.kind === 'quota' && ['openrouter', 'kilo', 'vercel'].includes(group)) for (const [n] of chain()) if (n.startsWith(`${group}:`) && n !== name) Object.assign(hs(n), { downUntil: c.until, kind: 'quota', reason: h.reason });   // account-wide cap: every model behind that key is out
+  if (c.kind === 'quota' && ['openrouter', 'kilo', 'vercel', 'ollama'].includes(group)) for (const [n] of chain()) if (n.startsWith(`${group}:`) && n !== name) Object.assign(hs(n), { downUntil: c.until, kind: 'quota', reason: h.reason });   // account-wide cap: every model behind that key is out
   const mins = Math.round((c.until - Date.now()) / 60_000);
   warn(`AI provider ${name} unavailable: ${c.kind} limit (HTTP ${e.status}), will not be retried until ${new Date(c.until).toISOString()} (${mins >= 90 ? (mins / 60).toFixed(1) + 'h' : mins + 'm'}); wasted attempts so far: ${h.wasted}, calls avoided: ${h.avoided}`);
   llmStats.lastError = `${name}: ${c.kind} limit until ${new Date(c.until).toISOString().slice(0, 16)}Z`; llmStats.lastErrorAt = Date.now();

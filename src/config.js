@@ -27,6 +27,7 @@ export const config = {
     gemini: env('GEMINI_API_KEY'),
     openrouter: env('OPENROUTER_API_KEY'),
     nvidia: env('NVIDIA_API_KEY'),
+    ollama: env('OLLAMA_API_KEY'),             // Ollama Cloud (OpenAI-compatible at https://ollama.com/v1); the free plan has hourly/weekly usage limits
     groq: env('GROQ_API_KEY'),                 // Groq free tier (OpenAI-compatible)
     kilo: env('KILO_API_KEY'),                 // Kilo gateway: only its FREE models are ever used
     aiGateway: env('AI_GATEWAY_API_KEY'),      // Vercel AI Gateway: only its zero-price models are ever used by the Research Brain
@@ -49,6 +50,8 @@ export const config = {
     openrouter: env('OPENROUTER_MODEL') || 'google/gemini-3.5-flash',
     // NVIDIA NIM (OpenAI-compatible, https://integrate.api.nvidia.com): the PRIMARY Research Brain model. Gemini and OpenRouter stay as fallbacks.
     custom: env('CUSTOM_LLM_MODEL') || 'auto',
+    // Ollama Cloud models, tried in this order (only those the cloud actually lists are used). Override with OLLAMA_MODELS=a,b,c
+    ollama: (env('OLLAMA_MODELS') || 'gpt-oss:120b,nemotron-3-super,gemma4:31b,glm-5.3-flash,gpt-oss:20b').split(',').map((x) => x.trim()).filter(Boolean),
     // Groq models, tried in this order (each has its own free daily/minute limits). Override with GROQ_MODELS=a,b,c
     groq: (env('GROQ_MODELS') || 'openai/gpt-oss-120b,llama-3.3-70b-versatile,qwen/qwen3-32b,openai/gpt-oss-20b').split(',').map((x) => x.trim()).filter(Boolean),
     nvidia: env('NVIDIA_MODEL') || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
