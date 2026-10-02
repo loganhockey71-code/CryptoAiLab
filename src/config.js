@@ -53,7 +53,7 @@ export const config = {
     // Ollama Cloud models, tried in this order (only those the cloud actually lists are used). Override with OLLAMA_MODELS=a,b,c
     ollama: (env('OLLAMA_MODELS') || 'gpt-oss:120b,nemotron-3-super,gemma4:31b,glm-5.3-flash,gpt-oss:20b').split(',').map((x) => x.trim()).filter(Boolean),
     // Groq models, tried in this order (each has its own free daily/minute limits). Override with GROQ_MODELS=a,b,c
-    groq: (env('GROQ_MODELS') || 'openai/gpt-oss-120b,llama-3.3-70b-versatile,qwen/qwen3-32b,openai/gpt-oss-20b').split(',').map((x) => x.trim()).filter(Boolean),
+    groq: (env('GROQ_MODELS') || 'openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b').split(',').map((x) => x.trim()).filter(Boolean),
     nvidia: env('NVIDIA_MODEL') || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
   },
   // Deterministic risk constants. The self-learning system must never write to these.
@@ -138,7 +138,7 @@ export const config = {
   // pressureMaxSignals: once any model has hit a DAILY quota, only this many of the best candidates are sent to the AI per scan, so what is left is reserved for them.
   // maxAttemptsPerSignal: HTTP calls one signal may make for TRANSIENT trouble (timeouts, 5xx, unparseable output) = the first call + 1 retry in total, across every model.
   // maxDiscoveriesPerSignal: models found unavailable (quota / rate limit / gone) while serving ONE signal; a safety stop so a bad day cannot burn calls walking a long chain.
-  llm: Object.freeze({ maxDiscoveriesPerSignal: 3, openrouterRefreshMs: 6 * 3600_000, maxAttemptsPerSignal: 2, authDownMs: 30 * 60_000, quotaFallbackMs: 2 * 3600_000, rateFallbackMs: 60_000, maxDownMs: 26 * 3600_000, pressureMaxSignals: 5 }),
+  llm: Object.freeze({ maxDiscoveriesPerSignal: 3, openrouterRefreshMs: 6 * 3600_000, maxAttemptsPerSignal: 2, authDownMs: 6 * 3600_000, quotaFallbackMs: 2 * 3600_000, rateFallbackMs: 60_000, maxDownMs: 26 * 3600_000, pressureMaxSignals: 5 }),
   // Trending / unusually-active detection. It only decides what gets researched FIRST; it never lowers a requirement.
   movers: Object.freeze({ chg1h: 0.04, chg4h: 0.08, chg24h: 0.15, rvol: 2.5, maxMoversPerScan: 3, fastTrigger1h: 0.08, fastCheckMs: 60_000, fastCooldownMs: 15 * 60_000 }),
   scanIntervalMs: 5 * 60_000,
