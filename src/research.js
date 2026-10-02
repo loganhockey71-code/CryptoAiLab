@@ -297,85 +297,28 @@ const lessonsBlock = (lessons) => lessons?.length
   ? `Lessons from your 5 most recent completed trades (weigh them, they are not rules):\n${lessons.map((l, i) => `${i + 1}. [${l.outcome}] ${l.symbol}: ${l.lesson}`).join('\n')}`
   : 'No prior trade lessons yet.';
 
-const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
-
-/** ctx: { symbol, name, price, btcRegime, timeframes, rvol, derivatives, news, macro, legislation, onchain, provenance } */
-export async function generateSignal(ctx, lessons) {
-  const prompt = `You are the Research Brain of a paper-trading system (long-only, spot). Assess whether ${ctx.symbol} (${ctx.name}) has a bullish setup over a horizon of 1 to 72 hours. Positions may last minutes, hours or 2+ days; many of the best are held for 1-2 days, so do not assume a quick exit: choose the horizon the higher timeframes (1h/4h/1d) actually support. A separate deterministic engine will verify candle confirmation and every risk rule; you only produce a structured signal.
+/**
+ * Second opinion on a Brain BUY. The LLM can only DOWNGRADE (return { veto: true, why }): it can never create a BUY, change a stop/target, or lift one of the Brain's vetoes.
+ * Its job is to catch what the keyword news reader cannot (an unfamiliar bad headline, a contradiction in the evidence). It sees the Brain's actual inputs, not a summary written afterwards.
+ * An outage, a timeout or an unparseable answer returns null = proceed (an AI failure never rejects a setup, CLAUDE.md).
+ */
+export async function reviewDecision(d, headlines) {
+  if (!llmUsable()) return null;
+  const prompt = `You are the risk reviewer for a paper-trading system (spot, long-only, 1x). A deterministic engine has proposed a BUY after analysing market structure, supply/demand, candles, volume, momentum, news and risk/reward. Your ONLY job is to look for a concrete reason NOT to take it. You cannot change the plan.
 
 ${STYLE}
 
-Reference price: ${ctx.price}
-BTC 1h regime: ${ctx.btcRegime}
-Multi-timeframe technicals (each timeframe: trendUp = EMA20>EMA50 and price>EMA50): ${JSON.stringify(ctx.timeframes)}
-Relative volume (RVOL, last completed 15m vs 20-candle avg): ${ctx.rvol}
-Why this coin is being looked at (trending/unusual activity flags): ${JSON.stringify(ctx.activity)}
-Smart money: positions held right now by tracked traders who each have a verified win rate >= 75%: ${JSON.stringify(ctx.smartMoney)}
-Order book (Tier 1, Coinbase level 2, full aggregated book; spread in %, depthUsd = resting USD within 0.5%/1% of mid, bid and ask side; a wide spread or thin depth means the quoted price is less reliable): ${JSON.stringify(ctx.orderBook)}
-Derivatives (Tier 2, Coinglass): ${JSON.stringify(ctx.derivatives)}
-Macro (Tier 3, FRED): ${JSON.stringify(ctx.macro)}
-Crypto/market legislation (Tier 3, Congress.gov): ${JSON.stringify(ctx.legislation)}
-Political, regulatory and central-bank events (Tier 3 = official White House / Federal Register / Federal Reserve / SEC / CFTC; Tier 4 = news outlets and an UNOFFICIAL Truth Social mirror; newest first): ${JSON.stringify(ctx.politics)}
-On-chain (Tier 4, Etherscan): ${JSON.stringify(ctx.onchain)}
-Recent headlines (Tier 4, with per-headline sentiment -1..1): ${JSON.stringify(ctx.news)}
-Data provenance/timestamps: ${JSON.stringify(ctx.provenance)}
+Coin: ${d.symbol}. Plan: entry ${d.entry}, stop ${d.stop}, target ${d.target}, net R:R ${d.rr}, expected holding ${d.holdHours}h. Setup: ${d.setup?.label}. Edge score ${d.score}/100 (${d.pUpSource}).
+Evidence the engine used: ${JSON.stringify({ reasons: d.reasons, evidence: d.evidence, factors: d.factors })}
+Latest headlines (newest first, unverified unless official): ${JSON.stringify(headlines)}
 
-Rules:
-- Several aggregators repeating the same underlying fact count as ONE independent source.
-- If reliable sources materially disagree, lower confidence or return direction "neutral".
-- A trending or unusually active coin is only a reason to LOOK, not to buy. Judge whether the move still has momentum or is exhausted/parabolic; chasing a vertical move is a real risk, so lower confidence (or return neutral) when it looks overextended or has no pullback to build on. Tracked traders holding a coin long is supporting evidence; tracked traders short is a strong reason to avoid it.
-- Political items are market-wide context, not coin-specific evidence. Prefer Tier 3 over Tier 4; treat social-media posts and headlines as unverified. Count them under "macro_gov". If a high-impact event from the last 24 hours (rate decision, tariffs, sanctions, an executive order or SEC/CFTC action touching crypto or markets) makes the setup riskier, lower confidence and say so in key_risks. Never invent a causal link between an event and this coin.
-- target_price and stop_price must be consistent with direction "bullish": stop_price < price < target_price. Stop distance must be inside this coin's band (${JSON.stringify(ctx.stopBand)}: min/max as fractions below price). It can NEVER be wider than ${config.risk.stopAbsMaxPct * 100}%, for any coin including memes; position size is derived from the stop, so a wider stop is not available.
-- target_price is where a PARTIAL profit is taken, the rest then trails. Aim it inside this coin's target band (${JSON.stringify(ctx.targetBand)} as fractions above price; memes may go higher). Net R:R vs your stop must be at least ${config.risk.minRR}. Do not inflate the target to pass R:R; if the setup only supports a smaller move, return neutral.
-- timeframe_hours is your intended holding period, between 1 and 72. Use 24-72 when the 4h/1d trend supports it and only use 6 or less for a genuinely short-lived setup.
-- "supporting_sources" and "conflicting_sources" must only contain values from: "exchange_technicals", "derivatives", "macro_gov", "news_onchain", "smart_money".
-
-${lessonsBlock(lessons)}
-
-Return JSON with exactly these keys:
-{"direction":"bullish"|"neutral"|"bearish","confidence":0-100,"target_price":number,"stop_price":number,"timeframe_hours":number,"supporting_sources":[...],"conflicting_sources":[...],"evidence_summary":"2-4 sentences, probabilistic wording","key_risks":"1-2 sentences"}`;
-
-  // A formatting slip must not cost a valid setup: validate (leniently), and if the answer is unusable ask once more, saying what was wrong.
-  if (!llmUsable()) { llmStats.skippedUnavailable++; return null; }   // nothing can answer: do not count it as a failed signal
-  let problem = null;
-  const budget = { left: L.maxAttemptsPerSignal, found: 0 };                 // ONE budget for this signal, shared with the corrective re-ask below
-  llmStats.signals++;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const out = await llmJson(attempt === 0 ? prompt : `${prompt}\n\nYour previous answer was rejected: ${problem}. Return the corrected JSON object only.`, budget);
-    if (!out) { llmStats.noSignal++; return null; }              // every model failed or timed out: the caller retries this coin later instead of rejecting it
-    const v = validateSignal(out.json, ctx.price);
-    if (v.ok) { llmStats.signalsOk++; llmStats.lastOkAt = Date.now(); llmStats.lastOkProvider = out.provider; return { provider: out.provider, ...v.signal }; }
-    problem = v.problem; noteError('invalid', `invalid signal: ${problem}`.slice(0, 140));
-    warn(`invalid LLM signal for ${ctx.symbol} (${problem})${attempt === 0 ? ', asking once more' : ''}`);
-  }
-  return null;
-}
-
-const SIGNAL_SOURCES = new Set(['exchange_technicals', 'derivatives', 'macro_gov', 'news_onchain', 'smart_money']);
-const numLoose = (v) => { if (typeof v === 'string') v = v.replace(/[%$,\s]/g, ''); const n = Number(v); return v !== '' && v != null && Number.isFinite(n) ? n : null; };
-
-/** Normalise and check a model answer. Accepts numeric strings, any-case direction, 0-1 confidence; requires stop < price < target for a bullish call. */
-export function validateSignal(j, price) {
-  if (!j || typeof j !== 'object') return { ok: false, problem: 'not a JSON object' };
-  const direction = String(j.direction ?? '').trim().toLowerCase();
-  if (!['bullish', 'neutral', 'bearish'].includes(direction)) return { ok: false, problem: `direction must be "bullish", "neutral" or "bearish" (got ${JSON.stringify(j.direction)})` };
-  let confidence = numLoose(j.confidence);
-  if (confidence == null) return { ok: false, problem: 'confidence must be a number from 0 to 100' };
-  if (confidence > 0 && confidence <= 1 && !Number.isInteger(confidence)) confidence *= 100;   // 0.85 -> 85
-  const target = numLoose(j.target_price), stop = numLoose(j.stop_price);
-  if (direction === 'bullish') {
-    if (target == null || stop == null) return { ok: false, problem: 'a bullish signal needs numeric target_price and stop_price' };
-    if (price > 0 && !(stop < price && price < target)) return { ok: false, problem: `for a bullish signal stop_price (${stop}) < price (${price}) < target_price (${target}) must hold` };
-  }
-  const clean = (a) => [...new Set((Array.isArray(a) ? a : []).filter((x) => SIGNAL_SOURCES.has(x)))];
-  return {
-    ok: true,
-    signal: {
-      direction, confidence: Math.max(0, Math.min(100, confidence)), target, stop, timeframeHours: numLoose(j.timeframe_hours),
-      supporting: clean(j.supporting_sources), conflicting: clean(j.conflicting_sources),
-      evidenceSummary: String(j.evidence_summary ?? '').slice(0, 1200), keyRisks: String(j.key_risks ?? '').slice(0, 600),
-    },
-  };
+Answer "wait" ONLY if the evidence above or a headline gives a specific, concrete reason (name it) that the engine's inputs contradict or did not account for (for example a negative headline about this coin or a market-wide shock, or an internal contradiction). Otherwise answer "proceed". Do not wait merely out of general caution.
+Return JSON: {"verdict":"proceed"|"wait","reason":"one sentence naming the specific evidence"}`;
+  const out = await llmJson(prompt, { left: 1, found: 0 });
+  const j = out?.json;
+  if (!j || String(j.verdict).toLowerCase() !== 'wait') return null;
+  const why = String(j.reason ?? '').slice(0, 240);
+  return why.length >= 12 ? { veto: true, why, provider: out.provider } : null;   // a veto must come with a stated reason
 }
 
 /** Structured post-mortem for a closed trade. trade/context are plain objects built by the engine. */

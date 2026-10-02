@@ -86,8 +86,32 @@ export const config = {
     maxEntryDriftPct: 0.005,     // reject an entry if the execution price is more than 0.5% away from the price the setup was confirmed at
     trailActivatePct: 0.015,
   }),
+  // THE BRAIN (src/brain.js): the AI's own market analysis decides every entry. Scores, weights and the probability map are model parameters, NOT risk limits: they are
+  // calibrated offline (scripts/backtest-brain.mjs) and may only be nudged by walk-forward-validated learning (src/learning.js), bounded by learnBound points.
+  brain: Object.freeze({
+    minScore: 80,                // = config.risk.minConfluence: the edge score a BUY needs (risk rule, learning can never lower it)
+    watchScore: 55,              // below this a coin with no veto is simply NEUTRAL
+    // P(target before stop) and expected value in R after costs. Priors are anchored to BACKTEST base rates (scripts/backtest-brain.mjs: entries meeting the real criteria hit
+    // a 2.5R+ target first only ~20-30% of the time and the held-out half was worse), so the score map below is deliberately modest: only the top tail of setups clears it.
+    minPUp: 0.30, minEV: 0.15,
+    exploreRiskFraction: 0.5,    // until 30+ own trades are measured AND their average R is positive, every entry risks only this fraction of the normal 1% (smaller than the cap, never larger)
+    exploreMinTrades: 30,
+    scoreScale: 55,
+    // Weights follow what scripts/research-long.mjs measured over 240 days x 38 coins: short-term momentum / relative strength / candle and flow signals carried ~zero or NEGATIVE forward information,
+    // so they are weighted low; setup quality and the R:R / location geometry (which set the payoff, not a prediction) carry the most.
+    weights: Object.freeze({ trend: 0.14, flow: 0.14, candles: 0.07, volume: 0.08, momentum: 0.05, structure: 0.16, regime: 0.08, relStrength: 0.02, news: 0.05, setup: 0.20, smart: 0.01 }),
+    calib: Object.freeze({ mid: 72, width: 10, floor: 0.15, ceil: 0.45 }),   // score -> P(target before stop); replaced by the live record as outcomes accumulate
+    maxSpreadPct: 0.4, minDepthUsd: 25_000,
+    maxBuysPerScan: 2, ringPerSymbol: 48, ringEveryMs: 20 * 60_000,
+    sellConfirmScans: 2,         // a SELL on an open position must hold on this many consecutive scans
+    learnBound: 8, learnMinTrain: 8, learnMinTest: 5, learnTrainFrac: 0.6,
+    missedMovePct: 0.08, missedWindowH: 24, missedEveryMs: 30 * 60_000,
+    llmReview: true,             // the LLM may only DOWNGRADE a BUY to WATCH (never create or upgrade one)
+  }),
   // Copy-trading selection + execution rules. The win-rate floor is hard: nobody below 75% is ever tracked.
+  // mirror=false: tracked traders are a small DATA input only. They can never open, add to or size a position (see engine.openCopyPosition).
   copy: Object.freeze({
+    mirror: false,
     minWinRate: 0.75, preferredWinRate: 0.80,
     windowDays: 90, minTrades: 30, minProfitFactor: 1.5,
     minSpanDays: 7, minActiveDays: 5, maxTradesPerDay: 40, minMedianHoldMin: 10,   // history must be long enough, and not bot-like (closes/day)

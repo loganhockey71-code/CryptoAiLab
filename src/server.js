@@ -20,7 +20,7 @@ app.use((req, res, next) => {
 
 app.use(express.static(path.join(config.root, 'public')));
 app.get('/vendor/lightweight-charts.js', (req, res) =>
-  res.sendFile(path.join(config.root, 'node_modules/lightweight-charts/dist/lightweight-charts.standalone.production.js')));
+  res.sendFile(path.join(config.root, 'node_modules/lightweight-charts/dist/lightweight-charts.standalone.production.js'), { dotfiles: 'allow' }));   // fixed path; 'allow' so a checkout under a dot-directory (e.g. .claude/worktrees) still serves it
 
 const fullSnapshot = () => ({ ...engine.snapshotForUi(), copy: copy.snapshot() });
 app.get('/api/state', (req, res) => (engine.isReady() ? res.json(fullSnapshot()) : res.status(503).json({ error: 'starting' })));

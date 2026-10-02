@@ -4,7 +4,9 @@
   "description": "Local paper-trading lab",
   "main": "src/server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test tests/brain.test.mjs",
+    "backtest": "node scripts/backtest-brain.mjs 30",
+    "research": "node scripts/research-long.mjs 240",
     "start": "node src/server.js"
   },
   "keywords": [],

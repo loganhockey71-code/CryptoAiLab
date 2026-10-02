@@ -89,14 +89,15 @@ let macroCache = null;
 export async function macro() {
   if (!fred) return fail(3, 'fred', 'FRED_API_KEY not set');
   if (macroCache && Date.now() - macroCache.at < 6 * 3600_000) return macroCache.value;
-  const series = { fed_funds_rate: 'DFF', us10y_yield: 'DGS10', us2y_yield: 'DGS2', vix: 'VIXCLS', cpi_index: 'CPIAUCSL' };
+  const series = { fed_funds_rate: 'DFF', us10y_yield: 'DGS10', us2y_yield: 'DGS2', vix: 'VIXCLS', cpi_index: 'CPIAUCSL', oil: 'DCOILWTICO', dollar: 'DTWEXBGS' };
   let value;
   try {
     const out = {};
     await Promise.all(Object.entries(series).map(async ([k, id]) => {
-      const j = await getJson(`https://api.stlouisfed.org/fred/series/observations?series_id=${id}&api_key=${fred}&file_type=json&sort_order=desc&limit=5`);
-      const o = j.observations?.find((x) => x.value !== '.');
-      if (o) out[k] = { value: Number(o.value), asOf: o.date };
+      const j = await getJson(`https://api.stlouisfed.org/fred/series/observations?series_id=${id}&api_key=${fred}&file_type=json&sort_order=desc&limit=8`);
+      const obs = (j.observations ?? []).filter((x) => x.value !== '.');
+      const o = obs[0], old = obs.length > 4 ? obs[Math.min(5, obs.length - 1)] : null;   // ~one trading week back
+      if (o) out[k] = { value: Number(o.value), asOf: o.date, ...(old && Number(old.value) > 0 ? { changePct: (Number(o.value) / Number(old.value) - 1) * 100 } : {}) };
     }));
     if (!Object.keys(out).length) throw new Error('no observations');
     value = wrap(3, 'fred', out);

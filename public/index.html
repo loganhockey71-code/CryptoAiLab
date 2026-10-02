@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Crypto AI Lab · Paper Trading</title>
+<title>Crypto AI Lab · Autonomous Trading Brain</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -14,9 +14,34 @@
 <div id="banner" class="banner hidden"></div>
 
 <main class="grid">
+  <section class="panel regime-panel">
+    <div class="panel-head"><h2>Market Regime <small id="regime-note">BTC / ETH structure, breadth, macro and news</small></h2></div>
+    <div id="regime"></div>
+  </section>
+
+  <section class="panel risks-panel">
+    <div class="panel-head"><h2>Biggest Risks <small>what could hurt right now</small></h2></div>
+    <div class="scroll" id="risks"></div>
+  </section>
+
+  <section class="panel opp-panel">
+    <div class="panel-head"><h2>Top Opportunities <small id="opp-note">ranked by the AI's own analysis: BUY = every gate passed, WATCH = waiting for something specific</small></h2></div>
+    <div id="opps" class="opps"></div>
+  </section>
+
+  <section class="panel avoid-panel">
+    <div class="panel-head"><h2>Coins to Avoid <small>downtrends, sellers in control, dangerous news</small></h2></div>
+    <div class="scroll" id="avoid"></div>
+  </section>
+
+  <section class="panel report-panel">
+    <div class="panel-head"><h2>Learning Report <small>outcomes, validated rules, vetoes, missed moves</small></h2></div>
+    <div class="scroll" id="learning"></div>
+  </section>
+
   <section class="panel table-panel">
     <div class="panel-head">
-      <h2>Tradable coins <small id="universe-note"></small></h2>
+      <h2>All tradable coins <small id="universe-note"></small></h2>
       <div class="toggles" id="up-toggles" title="Show only coins that are rising on every selected timeframe">
         <button type="button" class="tog" data-tf="m1">1M ▲</button>
         <button type="button" class="tog" data-tf="h1">1H ▲</button>
@@ -28,7 +53,7 @@
       <table id="coins">
         <thead><tr>
           <th>#</th><th>Coin</th><th class="r">Price</th><th class="r">1h / 24h</th><th>1m candle</th><th>Signal</th><th class="r">Score</th>
-          <th>BTC gate</th><th class="r">RVOL</th><th class="r">Funding</th><th class="r">News</th><th>Data</th>
+          <th>Class</th><th class="r">RVOL</th><th class="r">Funding</th><th class="r">News</th><th>Data</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -62,7 +87,7 @@
   </section>
 
   <section class="panel copy-panel">
-    <div class="panel-head"><h2>Copy Trading <small id="copy-note">Hyperliquid · win rate ≥ 75%</small></h2><span class="muted" id="copy-status"></span></div>
+    <div class="panel-head"><h2>Tracked Traders <small id="copy-note">data input only: they never open, size or veto a trade</small></h2><span class="muted" id="copy-status"></span></div>
     <div class="scroll" id="copy"></div>
   </section>
 
@@ -73,12 +98,12 @@
   </section>
 
   <section class="panel log-panel">
-    <div class="panel-head"><h2>Decision Log <small>why it did / didn't enter</small></h2></div>
+    <div class="panel-head"><h2>Decision Log <small>what the brain decided and why</small></h2></div>
     <div class="scroll" id="decisions"></div>
   </section>
 
   <section class="panel learn-panel">
-    <div class="panel-head"><h2>AI Learning Feed <small>post-mortems</small></h2></div>
+    <div class="panel-head"><h2>Post-mortems <small>one per closed trade, built from the measured outcome</small></h2></div>
     <div class="scroll" id="reflections"></div>
   </section>
 </main>

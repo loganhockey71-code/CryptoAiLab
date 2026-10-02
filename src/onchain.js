@@ -275,6 +275,7 @@ async function handleTrade(address, tr) {
 
   // Entries / adds: only wallets that are currently tracked (i.e. qualified).
   if (!w?.tracking) return;
+  if (!C.mirror) return;                                           // copy entries are OFF: tracked wallets are a data input only, they never open or add to a position
   for (const inn of tr.ins.filter((i) => !i.base && i.address)) {
     const o = { winRate: w.win_rate, price: inn.px };
     if (ageMs > Z.maxFillAgeMs) { skip(address, inn.symbol, `swap detected ${(ageMs / 1000).toFixed(0)}s late (limit ${Z.maxFillAgeMs / 1000}s)`, o); continue; }

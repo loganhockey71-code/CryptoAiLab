@@ -96,6 +96,7 @@ async function onFill(address, fill) {
   const increasing = Math.abs(end) > Math.abs(start) + eps && Math.sign(signed) === (endSide === 'long' ? 1 : -1);
   if (!increasing) return;
   if (!trader?.tracking) return;                                  // only currently-qualified tracked traders can open anything
+  if (!C.mirror) return;                                          // copy entries are OFF: tracked traders are a data input only, they never open a position
   const key = `${address}|${coin}`;
   const fresh = Math.abs(start) <= eps || flipped;                 // an entry from flat (or the new side of a flip)
   const b = building.get(key);
@@ -188,7 +189,7 @@ export async function start() {
   setInterval(() => refreshSmartMoney().catch((e) => warn('smart money', e.message)), 60_000);
   setTimeout(() => refreshSmartMoney().catch(() => {}), 20_000);
   setInterval(async () => { if (hl.midAgeMs() > R.staleMs) { try { await hl.refreshMidsRest(); } catch { /* retried next tick */ } } }, 5000);
-  log('Copy engine running (paper): mirrors only traders with a verified win rate >= 75%');
+  log('Tracked-trader engine running: DATA ONLY (config.copy.mirror=false). Tracked traders never open, size or veto a trade; the Brain trades its own analysis.');
 }
 
 /* ------------------------------------------------------------ smart-money view */

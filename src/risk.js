@@ -4,7 +4,6 @@ import { config } from './config.js';
 const R = config.risk;
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
-export const TF_WEIGHTS = { '1d': 0.15, '4h': 0.20, '1h': 0.25, '15m': 0.20, '5m': 0.20 };
 export const ROUND_TRIP_COST_PCT = 2 * (R.feePct + R.slippagePct);
 
 /** BTC/USD 1h regime from the 20/50 EMA snapshot. */
@@ -12,95 +11,6 @@ export function btcRegime(snap1h) {
   if (!snap1h) return { regime: 'unknown', bullish: false };
   const bullish = snap1h.ema20 > snap1h.ema50 && snap1h.price > snap1h.ema50;
   return { regime: bullish ? 'bullish' : 'bearish', bullish, ema20: snap1h.ema20, ema50: snap1h.ema50, price: snap1h.price };
-}
-
-function tfPoints(s) {
-  if (!s) return 0;
-  let p = 0;
-  if (s.trendUp) p += 0.4;
-  if (s.rsi != null) p += s.rsi >= 50 && s.rsi <= 75 ? 0.2 : s.rsi > 75 && s.rsi <= 85 ? 0.1 : 0;
-  if (s.macdHist != null && s.macdHist > 0) p += 0.2;
-  if (s.macdRising) p += 0.1;
-  if (s.aboveEma20) p += 0.1;
-  return p;
-}
-
-export function technicalScore(snaps) {
-  let total = 0;
-  const missing = [];
-  for (const [tf, w] of Object.entries(TF_WEIGHTS)) {
-    if (!snaps[tf]) missing.push(tf);
-    total += w * tfPoints(snaps[tf]);
-  }
-  return { score: 25 * total, missing };
-}
-
-export function rvolScore(rvol) {
-  if (rvol == null) return { score: 0, note: 'RVOL unavailable' };
-  // Reaching the RVOL > 1.5 threshold is required for the bulk of the credit.
-  if (rvol > 1.5) return { score: 15 + Math.min(10, ((rvol - 1.5) / 1.5) * 10), note: `RVOL ${rvol.toFixed(2)} > 1.5` };
-  return { score: Math.max(0, (rvol / 1.5) * 12), note: `RVOL ${rvol.toFixed(2)} <= 1.5` };
-}
-
-export function derivativesScore(d, priceUp) {
-  if (!d?.ok) return { score: 0, note: `derivatives unavailable (${d?.error ?? 'no data'})`, available: false };
-  const { fundingRatePct: f, oiChange1hPct: oi } = d.data;
-  let s = 10, notes = [];
-  if (f == null) { notes.push('funding n/a'); }
-  else if (f > 0.05) { notes.push(`funding ${f.toFixed(4)}% crowded long`); }
-  else if (f > 0.03) { s += 3; notes.push(`funding ${f.toFixed(4)}% elevated`); }
-  else { s += 7; notes.push(`funding ${f.toFixed(4)}% benign`); }
-  if (oi == null) { s += 2; notes.push('OI change n/a'); }
-  else if (oi > 0 && priceUp) { s += 8; notes.push(`OI +${oi.toFixed(2)}% with rising price`); }
-  else if (oi <= -2) { notes.push(`OI ${oi.toFixed(2)}% deleveraging`); }
-  else { s += 4; notes.push(`OI ${oi.toFixed(2)}%`); }
-  return { score: clamp(s, 0, 25), note: notes.join('; '), available: true };
-}
-
-export function researchScore(sig) {
-  if (!sig || sig.direction !== 'bullish') return { score: 0, note: sig ? `research bias ${sig.direction}` : 'no research signal' };
-  const independence = Math.min(1, sig.supporting.length / 3);   // needs ~3 independent supporting source classes for full credit
-  const conflictPenalty = Math.pow(0.7, sig.conflicting.length);
-  return {
-    score: 25 * (sig.confidence / 100) * independence * conflictPenalty,
-    note: `confidence ${sig.confidence}% x independence ${independence.toFixed(2)} x conflict ${conflictPenalty.toFixed(2)}`,
-  };
-}
-
-/** Tracked smart-money traders (win rate >= 75%) currently positioned in this coin. Shorts by trusted traders count against a long. */
-export function smartMoneyBonus(sm) {
-  if (!sm || !(sm.longs + sm.shorts)) return { bonus: 0, note: 'no tracked trader holds this coin' };
-  if (sm.net < 0) return { bonus: -10, note: `tracked traders net SHORT (${sm.shorts} short vs ${sm.longs} long)` };
-  if (sm.longs >= 2 || sm.preferredLongs >= 1) return { bonus: 8, note: `${sm.longs} tracked trader(s) long${sm.preferredLongs ? ` (${sm.preferredLongs} at >=80% win rate)` : ''}` };
-  if (sm.longs >= 1) return { bonus: 4, note: '1 tracked trader long' };
-  return { bonus: 0, note: 'tracked traders flat/mixed' };
-}
-
-export function confluence({ snaps, rvol, signal, derivatives, priceUp, smartMoney }) {
-  const t = technicalScore(snaps), v = rvolScore(rvol), r = researchScore(signal), d = derivativesScore(derivatives, priceUp);
-  const sm = smartMoneyBonus(smartMoney);
-  const smartTotal = clamp(d.score + sm.bonus, 0, 25);    // 4th component = smart money: derivatives positioning + tracked-trader alignment
-  const total = t.score + v.score + r.score + smartTotal;
-  return {
-    total: Math.round(total * 10) / 10,
-    technical: Math.round(t.score * 10) / 10, rvol: Math.round(v.score * 10) / 10,
-    research: Math.round(r.score * 10) / 10, derivatives: Math.round(smartTotal * 10) / 10,
-    notes: { technical: t.missing.length ? `missing timeframes: ${t.missing.join(',')}` : 'all timeframes present', rvol: v.note, research: r.note, derivatives: `${d.note}; ${sm.note}` },
-  };
-}
-
-/**
- * Every requirement must pass INDEPENDENTLY (not just the sum): technical, volume, smart money, research.
- * (Candle confirmation, the 80/100 total and every risk filter are enforced separately.) Returns { fails: [...] }.
- */
-export function requirements(c, smartMoney) {
-  const F = R.minComponent, fails = [];
-  if (c.technical < F) fails.push(`technical ${c.technical}/25 < ${F}`);
-  if (c.rvol < F) fails.push(`volume (RVOL) ${c.rvol}/25 < ${F}`);
-  if (c.derivatives < F) fails.push(`smart money ${c.derivatives}/25 < ${F}`);
-  if (smartMoney && smartMoney.net < 0) fails.push('tracked smart-money traders are net short');
-  if (c.research < F) fails.push(`research ${c.research}/25 < ${F}`);
-  return { fails, floor: F };
 }
 
 /** Stop band [min, max] for a coin: BTC 1.5-2%, ETH 2-2.5%, Top 20 2.5-3%, Top 21-50 3-4%, Top 51-100 and memes 4%. Never wider than the 4% hard cap. */

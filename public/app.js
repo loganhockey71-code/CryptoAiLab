@@ -57,7 +57,7 @@ function renderStats(s) {
   const notes = [];
   if (!p.gate.allowed) notes.push(`Trading blocked: ${p.gate.reason}`);
   if (!h.supabase) notes.push('Supabase key missing: nothing is being persisted');
-  if (!h.llm) notes.push('No LLM key: Research Brain offline, staying 100% cash');
+  if (!h.llm) notes.push('No LLM key: the optional AI second-look reviewer is off. The Brain still analyses and trades on its own.');
   if (s.scan.lastError) notes.push(`Last scan error: ${s.scan.lastError}`);
   const srcDown = Object.entries(h.sources).filter(([, v]) => !v.ok).map(([k, v]) => `${k} (${v.error})`);
   if (srcDown.length) notes.push(`Unreliable sources: ${srcDown.join('; ')}`);
@@ -93,7 +93,7 @@ function renderTable(s) {
     const c = r.candle;
     const candle = c ? `<span class="${c.c >= c.o ? 'up' : 'down'}">${c.c >= c.o ? '▲' : '▼'} ${pct((c.c - c.o) / c.o)}</span> <span class="muted">${price(c.l)}–${price(c.h)}</span>` : '<span class="muted">—</span>';
     const sig = r.signal.startsWith('IN') ? `<span class="pill good">${r.signal}</span>` : r.signal.startsWith('AWAIT') ? `<span class="pill amber">${r.signal}</span>` : `<span class="muted">${esc(r.signal)}</span>`;
-    const gateCell = !r.tradable ? '<span class="muted">n/a</span>' : gate ? '<span class="pill good">open</span>' : '<span class="pill bad">closed</span>';
+    const gateCell = !r.cls ? '<span class="muted">—</span>' : `<span class="pill ${r.cls === 'HOT' ? 'hotc' : r.cls === 'AVOID' ? 'avoidc' : r.cls === 'WATCH' ? 'amber' : ''}">${r.cls}</span>`;
     const data = !r.tradable ? `<span class="muted" title="excluded">${esc(r.excluded)}</span>`
       : r.cooldownUntil ? `<span class="pill amber" title="2h stop-loss cooldown">cooldown</span>`
       : r.thin ? `<span class="pill amber" title="24h volume $${Math.round(r.volume24h).toLocaleString('en-US')}: tracked, but never entered (too thin to fill)">thin volume</span>`
@@ -115,7 +115,7 @@ function renderPositions(s) {
   const pend = s.pending.map((p) => `<div class="item"><div class="meta"><b>${esc(p.symbol)}</b><span class="pill amber">awaiting candle confirmation</span><span>ref ${price(p.refPrice)}</span><span>score ${p.score}</span><span>${ago(p.createdAt)}</span></div></div>`).join('');
   if (!s.positions.length && !pend) { el.innerHTML = '<div class="empty">100% cash. No open paper positions.</div>'; return; }
   el.innerHTML = s.positions.map((p) => `<div class="item" data-sym="${esc(p.symbol)}" style="cursor:pointer">
-    <div class="meta"><b>${esc(p.symbol)}</b><span class="pill ${p.side === 'short' ? 'bad' : 'good'}">${esc(p.side)}</span>${p.source === 'copy' ? '' : `<span class="pill own" title="${esc((p.trigger?.reasons || []).join(', '))}">OWN IDEA${p.trigger?.kind === 'mover' ? ' · trending/unusual mover' : ''}</span>`}${p.source === 'copy' ? `<span class="pill amber" title="${esc(p.trader)}">copy ${p.venue === 'onchain' ? 'on-chain ' : ''}${esc(p.trader.slice(0, 8))} · ${(p.traderWinRate * 100).toFixed(0)}% win rate</span>` : ''}<span>entry ${price(p.entry)}</span>${p.leaderPx ? `<span>leader ${price(p.leaderPx)}</span>` : ''}<span>now ${price(p.price)}</span>${p.target ? `<span>target ${price(p.target)}</span>` : ''}<span>${p.source === 'copy' ? 'hard stop' : 'stop'} ${price(p.stop)}</span>${p.trailing ? `<span>trail ${price(p.trailing)}</span>` : ''}${p.rr != null ? `<span>R:R ${p.rr.toFixed(2)}</span>` : ''}<span>${money(p.notional)}</span></div>
+    <div class="meta"><b>${esc(p.symbol)}</b><span class="pill ${p.side === 'short' ? 'bad' : 'good'}">${esc(p.side)}</span>${p.source === 'copy' ? '' : `<span class="pill own" title="${esc((p.trigger?.reasons || []).join(', '))}">AI ANALYSIS${p.trigger?.kind === 'mover' ? ' · mover' : ''}</span>`}${p.source === 'copy' ? `<span class="pill amber" title="${esc(p.trader)}">copy ${p.venue === 'onchain' ? 'on-chain ' : ''}${esc(p.trader.slice(0, 8))} · ${(p.traderWinRate * 100).toFixed(0)}% win rate</span>` : ''}<span>entry ${price(p.entry)}</span>${p.leaderPx ? `<span>leader ${price(p.leaderPx)}</span>` : ''}<span>now ${price(p.price)}</span>${p.target ? `<span>target ${price(p.target)}</span>` : ''}<span>${p.source === 'copy' ? 'hard stop' : 'stop'} ${price(p.stop)}</span>${p.trailing ? `<span>trail ${price(p.trailing)}</span>` : ''}${p.rr != null ? `<span>R:R ${p.rr.toFixed(2)}</span>` : ''}<span>${money(p.notional)}</span></div>
     <div><b class="${cls(p.pnl)}">${money(p.pnl)} (${pct(p.pnlPct)})</b> <span class="muted">net of fees/slippage · opened ${ago(p.openedAt)}</span></div>
     <div class="why"><b>Why it entered:</b> ${esc(p.why)}</div></div>`).join('') + pend;
 }
@@ -141,11 +141,11 @@ function renderReflections(s) {
     : '<div class="empty">No completed trades yet. A post-mortem is written after every trade, win or lose.</div>';
 }
 
-const reasonLabel = { stop_loss: 'hit stop-loss', downtrend_exit: 'downtrend: cut early', trailing_stop: 'trailing stop', momentum_reversal: 'momentum reversed', leader_exit: 'trader exited', leader_flip: 'trader flipped', leader_exit_while_offline: 'trader exited (offline)', circuit_breaker_daily_loss: 'daily loss cap' };
+const reasonLabel = { brain_sell: 'AI SELL: structure broke', stop_loss: 'hit stop-loss', downtrend_exit: 'downtrend: cut early', trailing_stop: 'trailing stop', momentum_reversal: 'momentum reversed', leader_exit: 'trader exited', leader_flip: 'trader flipped', leader_exit_while_offline: 'trader exited (offline)', circuit_breaker_daily_loss: 'daily loss cap' };
 const sourceLabel = (t) => (t.source === 'copy_hyperliquid' ? `copy · Hyperliquid ${t.trader ? t.trader.slice(0, 6) : ''}` : t.source === 'copy_zerion' ? `copy · on-chain ${t.trader ? t.trader.slice(0, 6) : ''}` : 'LLM strategy');
 const typePill = (t) => (t.origin === 'mimic'
   ? `<span class="pill amber">MIMIC</span> <span class="muted">${esc(sourceLabel(t).replace('copy · ', ''))}</span>`
-  : `<span class="pill own">OWN IDEA</span> <span class="muted" title="${esc((t.triggerReasons || []).join(', '))}">${t.trigger === 'mover' ? 'trending / unusual mover' : 'regular scan'}</span>`);
+  : `<span class="pill own">OWN IDEA</span> <span class="muted" title="${esc((t.triggerReasons || []).join(', '))}">${t.trigger === 'brain' ? 'AI analysis' : t.trigger === 'mover' ? 'trending / unusual mover' : 'regular scan'}</span>`);
 const held = (a, b) => { const m = Math.max(0, (b - a) / 60000); return m < 90 ? `${m.toFixed(0)}m` : m < 2880 ? `${(m / 60).toFixed(1)}h` : `${(m / 1440).toFixed(1)}d`; };
 
 function renderHistory(h) {
@@ -229,9 +229,82 @@ function renderRadar(r) {
   $('#radar-watch').innerHTML = rows(r.watchMovers, (x) => `<div class="radar-row"><span><b>${esc(x.symbol)}</b> <span class="muted">${esc(x.name)}${x.cgRank ? ` · #${x.cgRank}` : ''}</span></span><span class="${cls(x.chg24h)}">${x.chg1h == null ? '—' : (x.chg1h * 100).toFixed(1) + '%'} / ${x.chg24h == null ? '—' : (x.chg24h * 100).toFixed(1) + '%'}</span></div>`);
 }
 
+/* -------------------------------------------------------------- the Brain */
+const TRN = { strong_up: ['▲▲', 'up'], up: ['▲', 'up'], range: ['■', 'fl'], down: ['▼', 'dn'], strong_down: ['▼▼', 'dn'] };
+const trendTags = (t) => (t ? Object.entries(t).map(([k, v]) => { const [g, c] = TRN[v] || ['?', 'fl']; return `<i class="${c}" title="${esc(String(v).replace('_', ' '))}">${k} ${g}</i>`; }).join('') : '—');
+const sdText = (f) => (f ? `1h ${esc(String(f.h1).replace('_', ' '))}${f.h1shift && f.h1shift !== 'none' ? ' · ' + esc(f.h1shift.replace('_', ' ')) : ''}; 15m ${esc(String(f.m15).replace('_', ' '))}${f.absorption ? ' · ' + esc(f.absorption.replace(/_/g, ' ')) : ''}` : '—');
+const clsPill = (c) => `<span class="pill ${c === 'HOT' ? 'hotc' : c === 'AVOID' ? 'avoidc' : c === 'WATCH' ? 'amber' : ''}">${esc(c)}</span>`;
+const newsText = (n) => (n && n.events && n.events.length ? n.events.slice(0, 2).map((e) => `${esc(e.label)} <span class="${e.direction === 'bullish' ? 'up' : e.direction === 'bearish' ? 'down' : 'muted'}">${esc(e.direction)}</span> (${e.pricedIn === 'unknown' ? 'priced-in unknown' : e.pricedIn === 'no' ? 'not priced in' : 'priced in: ' + esc(e.pricedIn)})`).join('; ') : '<span class="muted">no relevant headline</span>');
+
+function oppCard(o) {
+  const buy = o.action === 'BUY';
+  const lv = (x) => (x == null ? '—' : price(x));
+  return `<div class="opp ${buy ? 'buy' : ''}" data-sym="${esc(o.symbol)}">
+    <h4>${esc(o.symbol)} <span class="muted" style="font-weight:400">${esc(o.name)}</span> <span class="pill ${buy ? 'good' : 'amber'}">${esc(o.action)}</span>${clsPill(o.cls)}${o.setup ? `<span class="pill own">${esc(o.setup)}</span>` : ''}
+      <span class="big"><b>${o.score}</b>/100 edge score<br>P(target first) ${(o.pUp * 100).toFixed(0)}% · EV ${o.ev == null ? '—' : o.ev + 'R'}</span></h4>
+    <div class="facts">
+      <span class="k">Signal</span><span>${esc(o.action)} · confidence = ${(o.pUp * 100).toFixed(0)}% <span class="muted">(${esc(o.pUpSource || '')})</span></span>
+      <span class="k">Trend</span><span class="tr">${trendTags(o.trend)}</span>
+      <span class="k">Supply/demand</span><span>${sdText(o.flow)}</span>
+      <span class="k">Candles</span><span>${o.candles && o.candles.length ? esc(o.candles.join(', ').replace(/_/g, ' ')) : '<span class="muted">no pattern</span>'}</span>
+      <span class="k">Volume</span><span>${o.volume ? `${(o.volume.rvol15 ?? 0).toFixed(1)}x (15m) · ${(o.volume.rvol1h ?? 0).toFixed(1)}x (1h)` : '—'}</span>
+      <span class="k">Momentum</span><span>${o.momentum ? `RSI ${o.momentum.rsi1h ?? '—'} · 6-bar ${pct(o.momentum.roc6)} · ${o.momentum.ext1h} ATR from mean${o.momentum.overextended ? ' <span class="warn">(extended)</span>' : ''}` : '—'}</span>
+      <span class="k">News effect</span><span>${newsText(o.news)}${o.news ? ` · net ${o.news.effect >= 0 ? '+' : ''}${o.news.effect}` : ''}</span>
+    </div>
+    <div class="plan"><span>entry <b>${lv(o.entry)}</b></span><span>stop <b class="down">${lv(o.stop)}</b></span><span>target <b class="up">${lv(o.target)}</b></span><span>R:R <b>${o.rr ?? '—'}</b></span><span>hold <b>${o.holdHours ? '~' + o.holdHours + 'h' : '—'}</b></span></div>
+    <ul>${(o.reasons || []).slice(0, 5).map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
+    ${o.waitingFor && o.waitingFor.length ? `<div class="wait"><b>Waiting for:</b> ${o.waitingFor.map(esc).join(' · ')}</div>` : ''}
+    ${o.vetoes && o.vetoes.length ? `<div class="why"><b>Blocked by:</b> ${o.vetoes.slice(0, 3).map(esc).join(' · ')}</div>` : ''}
+    ${o.adjustments && o.adjustments.length ? `<div class="why"><b>Learned rules applied:</b> ${o.adjustments.map((a) => esc(a.why) + ' (' + (a.delta > 0 ? '+' : '') + a.delta + ')').join('; ')}</div>` : ''}
+  </div>`;
+}
+
+function renderBrain(b) {
+  if (!b) return;
+  const rg = b.regime;
+  const chip = (label, val, c = '') => `<div class="chip"><b class="${c}">${val}</b><span>${label}</span></div>`;
+  const rc = !rg ? 'warn' : rg.score >= 0.25 ? 'up' : rg.score <= -0.25 ? 'down' : 'warn';
+  $('#regime').innerHTML = rg ? `<div class="chips" style="padding:0 0 8px;border:0">${chip('Regime', esc(rg.label.replace(/_/g, ' ')), rc)}${chip('Score', rg.score, rc)}${chip('Breadth', b.breadth == null ? '—' : (b.breadth * 100).toFixed(0) + '%')}${chip('Coins analysed', b.analysed)}${chip('BUY', b.counts.BUY || 0, 'up')}${chip('HOT', b.counts.HOT || 0)}${chip('WATCH', b.counts.WATCH || 0)}${chip('AVOID', b.counts.AVOID || 0, 'down')}${chip('News effect', b.market ? (b.market.effect >= 0 ? '+' : '') + b.market.effect : '—', b.market && b.market.effect < -0.15 ? 'down' : b.market && b.market.effect > 0.15 ? 'up' : '')}</div>
+    ${rg.notes.map((n) => `<p class="muted" style="margin:2px 0">${esc(n)}</p>`).join('')}
+    <h3 style="margin:10px 0 4px;font-size:12px" class="muted">NEWS EVENTS READ <span class="muted" style="font-weight:400">what happened → affected coins → direction → strength → priced in?</span></h3>
+    ${b.events && b.events.length ? b.events.slice(0, 8).map((e) => `<div class="item" style="padding:5px 0"><span class="pill ${e.direction === 'bullish' ? 'good' : e.direction === 'bearish' ? 'bad' : ''}">${esc(e.direction)}</span> <b>${esc(e.label)}</b> <span class="muted">· ${e.scope === 'market' ? 'whole market' : esc((e.coins || []).join(', '))} · strength ${e.strength} · lasts ~${e.durationHours}h · ${e.ageHours == null ? 'age ?' : e.ageHours + 'h ago'} · tier ${e.tier}</span><div class="muted">${esc(e.what)}</div></div>`).join('') : '<div class="muted">No headline matched a known market-moving pattern in the last day.</div>'}`
+    : '<div class="empty">Waiting for the first scan…</div>';
+  $('#risks').innerHTML = (b.risks || []).length ? b.risks.map((r) => `<div class="item"><span class="sev ${r.severity >= 0.7 ? 'hi' : ''}"><b style="width:${Math.round(r.severity * 100)}%"></b></span><span class="pill ${r.severity >= 0.7 ? 'bad' : 'amber'}">${esc(r.kind)}</span> ${esc(r.text)}</div>`).join('') : '<div class="empty">No elevated risks detected.</div>';
+  const opps = b.opportunities || [];
+  $('#opp-note').textContent = opps.length ? `${opps.filter((o) => o.action === 'BUY').length} BUY · ${opps.filter((o) => o.action !== 'BUY').length} WATCH/HOT · ${b.analysed} coins analysed · stays in cash when nothing has an edge` : 'stays in cash when nothing has an edge';
+  $('#opps').innerHTML = opps.length ? opps.slice(0, 18).map(oppCard).join('') : '<div class="empty" style="grid-column:1/-1">No coin has a setup right now. The AI is waiting instead of forcing a trade: that is the correct state when there is no edge.</div>';
+  $('#avoid').innerHTML = (b.avoid || []).length ? b.avoid.map((o) => `<div class="item" data-sym="${esc(o.symbol)}" style="cursor:pointer"><div class="meta"><b>${esc(o.symbol)}</b>${clsPill('AVOID')}<span class="tr">${trendTags(o.trend)}</span><span>score ${o.score}</span></div><div class="why">${esc((o.vetoes || []).slice(0, 2).join(' · '))}</div></div>`).join('') : '<div class="empty">Nothing flagged.</div>';
+  renderLearning(b.learning, b.rules, b.positions);
+}
+
+function renderLearning(L, rules, positions) {
+  if (!L) return;
+  const st = (x) => (x && x.n ? `${x.n} measured · win rate ${(x.winRate * 100).toFixed(0)}% · avg ${x.avgR >= 0 ? '+' : ''}${x.avgR}R · target first ${(x.targetFirst * 100).toFixed(0)}% · avg best ${pct(x.avgMfe)} / worst ${pct(x.avgMae)}` : 'none measured yet');
+  const rows = (arr, f) => (arr && arr.length ? arr.map(f).join('') : '');
+  $('#learning').innerHTML = `<div class="rep">
+    ${L.sufficiency && L.sufficiency.length ? L.sufficiency.map((n) => `<p class="note">⚠ ${esc(n)}</p>`).join('') : ''}
+    <p class="muted">Decision rules in force: BUY needs score ≥ ${rules.minScore}, P(target first) ≥ ${(rules.minPUp * 100).toFixed(0)}%, EV ≥ ${rules.minEV}R, net R:R ≥ ${rules.minRR} and no veto. Tracked traders: ${esc(rules.copyTrading)}.</p>
+    <h3>Open positions: HOLD / SELL</h3>${positions && positions.length ? positions.map((p) => `<p><b>${esc(p.symbol)}</b> <span class="pill ${p.action === 'SELL' ? 'bad' : 'good'}">${esc(p.action)}</span> ${esc(p.reasons[0] || '')}${p.invalidation ? ` <span class="muted">(thesis breaks below ${price(p.invalidation)})</span>` : ''}</p>`).join('') : '<p class="muted">No open positions.</p>'}
+    <h3>Real paper trades</h3><p>${st(L.trades)}</p>
+    <h3>Every journaled setup, traded or not (counterfactual, measured from real candles)</h3><p>${st(L.counterfactual)} · ${L.pending} waiting to mature</p>
+    <table class="mini"><thead><tr><th>Edge score</th><th class="r">n</th><th class="r">Win</th><th class="r">Avg R</th><th class="r">Target first</th></tr></thead><tbody>${rows(L.calibration, (c) => `<tr><td>${esc(c.label)}</td><td class="r">${c.n}</td><td class="r">${c.n ? (c.winRate * 100).toFixed(0) + '%' : '—'}</td><td class="r ${cls(c.avgR)}">${c.n ? c.avgR : '—'}</td><td class="r">${c.n ? (c.targetFirst * 100).toFixed(0) + '%' : '—'}</td></tr>`)}</tbody></table>
+    <h3>Rules learned (walk-forward validated: same sign on an earlier AND a later slice of time)</h3>
+    ${L.rules && L.rules.length ? `<table class="mini"><thead><tr><th>Rule</th><th>Status</th><th class="r">Train</th><th class="r">Test</th><th class="r">Score</th></tr></thead><tbody>${L.rules.map((r) => `<tr title="${esc(r.why)}"><td>${esc(r.desc)}</td><td><span class="pill ${r.status === 'active' ? 'good' : ''}">${esc(r.status)}</span></td><td class="r">${r.trainR}R (${r.nTrain})</td><td class="r">${r.testR}R (${r.nTest})</td><td class="r">${r.delta ? (r.delta > 0 ? '+' : '') + r.delta : '—'}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">No buckets have samples yet.</p>'}
+    <h3>Do the vetoes earn their keep? (what the setups they blocked actually did)</h3>
+    ${L.vetoes && L.vetoes.length ? `<table class="mini"><thead><tr><th>Veto</th><th class="r">Blocked</th><th class="r">Avg R</th><th class="r">Missed big moves</th><th>Verdict</th></tr></thead><tbody>${L.vetoes.slice(0, 8).map((v) => `<tr><td>${esc(v.text)}</td><td class="r">${v.blocked}</td><td class="r ${cls(v.avgR)}">${v.avgR}</td><td class="r">${v.missedMoves}</td><td class="muted">${esc(v.verdict)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Needs 5+ measured blocked setups per veto.</p>'}
+    <h3>Missed opportunities: "a coin went up and the AI did not catch it earlier"</h3>
+    ${L.missed && L.missed.list.length ? `<p class="muted">${L.missed.count} moves of ≥ 8% in the last 24h · flagged early on ${L.missed.early}. Most common reasons: ${L.missed.topReasons.slice(0, 3).map((r) => `${esc(r.text)} (${r.n})`).join('; ')}.</p>${L.missed.list.map((m) => `<p>• ${esc(m.text)}</p>`).join('')}` : '<p class="muted">No coin moved ≥ 8% in a way we can review yet (checked every 30 minutes).</p>'}
+    <h3>Last closed trades: why they won or lost</h3>
+    ${L.recentTrades && L.recentTrades.length ? L.recentTrades.map((t) => `<p><b>${esc(t.symbol)}</b> <span class="pill ${t.R > 0 ? 'good' : 'bad'}">${t.R > 0 ? 'WIN' : 'LOSS'} ${t.R}R</span> ${esc(t.setup || '')} (score ${t.score}) · ${esc(t.hit)} · best ${pct(t.mfe)} / worst ${pct(t.mae)}<br><span class="muted">${esc(t.why || '')}</span></p>`).join('') : '<p class="muted">No closed AI trades yet.</p>'}
+  </div>`;
+}
+
+$('#opps').addEventListener('click', (e) => { const c = e.target.closest('[data-sym]'); if (c) { selected = c.dataset.sym; $('#chart-symbol').textContent = selected; refreshChart(); } });
+$('#avoid').addEventListener('click', (e) => { const c = e.target.closest('[data-sym]'); if (c) { selected = c.dataset.sym; $('#chart-symbol').textContent = selected; refreshChart(); } });
+
 function render(s) {
   latest = s;
-  renderStats(s); renderTable(s); renderPositions(s); renderHistory(s.history); renderNews(s.newsFeed); renderRadar(s.radar); renderCopy(s.copy); renderDecisions(s); renderReflections(s);
+  renderStats(s); renderBrain(s.brain); renderTable(s); renderPositions(s); renderHistory(s.history); renderNews(s.newsFeed); renderRadar(s.radar); renderCopy(s.copy); renderDecisions(s); renderReflections(s);
 }
 
 $('#copy').addEventListener('click', async (e) => {

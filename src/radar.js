@@ -37,9 +37,12 @@ export function radarPriority(c, x = {}) {
   const ratio = c.mcap > 0 ? c.vol24 / c.mcap : 0;
   add(ratio >= 0.05 && ratio <= Z.maxVolMcap ? 5 : 0, null);
   add(clamp01(Math.log10(Math.max(c.vol24 ?? 1, 1) / 1e6) / 2) * 10, null);          // liquidity: $1M -> 0 pts, $100M -> 10 pts
-  if (x.smartMoney && x.smartMoney.net > 0) add(15, `${x.smartMoney.longs} tracked trader(s) long`);
+  if (x.smartMoney && x.smartMoney.net > 0) add(2, `${x.smartMoney.longs} tracked trader(s) long`);   // a small data point only: other traders never drive what gets looked at or traded
   if (x.sentiment && x.sentiment.count >= 1 && x.sentiment.score > 0.3) add(10, 'positive headline');
   if (x.partial != null) add((x.partial / 50) * 15, null);
-  if ((x.partialDelta ?? 0) >= 8) add(5, 'technicals improving');
+  if ((x.partialDelta ?? 0) >= 4) add(5, 'setup quality improving');
+  if (x.brainCls === 'HOT') add(20, 'strong setup (brain)');
+  else if (x.brainCls === 'WATCH') add(10, 'setup forming (brain)');
+  else if (x.brainCls === 'AVOID') s = Math.max(0, s - 15);                  // downtrend / sellers in control: low priority, but never zero (a reversal must still be noticed)
   return { score: Math.min(100, s), reasons };
 }
