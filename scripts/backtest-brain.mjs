@@ -1,8 +1,7 @@
-// Walk-forward backtest of the Brain on REAL Coinbase history (public endpoints, read-only, no keys). Replays every hour: analyse every coin the way the live scan does,
-// ask the Brain for a decision, and score each BUY by walking forward on 5m candles (stop first if a bar touches both). Outcomes are in R (net of fees + slippage).
-// Usage:  node scripts/backtest-brain.mjs [days=30] [--refresh] [--json]
-// It reports (1) results by score bucket and setup, (2) the SAME entries split chronologically into train/test (the test half was not used to choose anything),
-// (3) baselines: what the old-style "technical flags only" entry and "buy anyway in a downtrend" would have done with the same stop/target rules.
+// Online, look-ahead-free backtest of the Brain on REAL Coinbase history (public endpoints, read-only, no keys). Replays every hour: analyse every coin like the live scan, ask the Brain for LONG and SHORT
+// evaluations, and walk every candidate setup forward on 5m candles (stop first if a bar touches both). The empirical probability model at hour T only knows outcomes whose 48h had already elapsed.
+// Reports: the anti-chasing study (does entering late really do worse?), probability calibration (predicted vs actual on unseen data), realistic R per setup, and the full pipeline's online result.
+// Usage:  node scripts/backtest-brain.mjs [days=30] [--refresh] [--calibrate]   (--calibrate writes logs/calibration.json, which the live Brain reads)
 import fs from 'node:fs';
 import path from 'node:path';
 process.env.PAPER_TRADING ??= 'true';
@@ -39,7 +38,7 @@ async function fetchRange(product, gran, s0, s1) {
 }
 async function load(sym, endSec) {
   const f = path.join(CACHE, `${sym}-${DAYS}d.json`);
-  if (!REFRESH && fs.existsSync(f) && Date.now() - fs.statSync(f).mtimeMs < 6 * 3600_000) return JSON.parse(fs.readFileSync(f, 'utf8'));
+  if (!REFRESH && fs.existsSync(f) && Date.now() - fs.statSync(f).mtimeMs < 24 * 3600_000) return JSON.parse(fs.readFileSync(f, 'utf8'));
   const product = `${sym}-USD`, start = endSec - DAYS * 86400;
   try {
     const data = { h1: await fetchRange(product, 3600, start - 320 * 3600, endSec), m15: await fetchRange(product, 900, start - 80 * 3600, endSec), m5: await fetchRange(product, 300, start - 30 * 3600, endSec), d1: await fetchRange(product, 86400, start - 320 * 86400, endSec) };
@@ -56,47 +55,46 @@ const upto = (arr, gran, T, n = 300) => {        // completed candles at time T,
 };
 const withForming = (done, price, t) => (done.length ? [...done, { t, o: price, h: price, l: price, c: price, v: 0 }] : done);
 
-const end = Math.floor(Date.now() / 3600_000) * 3600 - 3600 * 0, endSec = end;
+const { observe, LEVELS, buildModel, saveHistorical, priorReach } = await import('../src/empirical.js');
+const endSec = Math.floor(Date.now() / 3600_000) * 3600;
 console.error(`loading ${SYMS.length} coins x ${DAYS} days (cached after the first run)…`);
 const data = {};
 for (const s of SYMS) { const d = await load(s, endSec); if (d) data[s] = d; }
 const syms = Object.keys(data);
 console.error(`${syms.length} coins loaded`);
 
-const T0 = endSec - DAYS * 86400, T1 = endSec - 3 * 3600;          // leave 3h of future for the last entries
-const outcomes = [];
-function walk(sym, T, entry, stop, target, maxH) {
-  const m5 = data[sym].m5; let i = 0, hi = m5.length;
-  while (i < hi) { const m = (i + hi) >> 1; if (m5[m].t < T) i = m + 1; else hi = m; }
-  let mfe = 0, mae = 0;
-  const limit = T + maxH * 3600;
-  for (; i < m5.length && m5[i].t < limit; i++) {
-    const c = m5[i];
-    mfe = Math.max(mfe, c.h / entry - 1); mae = Math.min(mae, c.l / entry - 1);
-    if (c.l <= stop) return { exit: stop, reason: 'stop', mfe, mae, hours: (c.t - T) / 3600 };
-    if (c.h >= target) return { exit: target, reason: 'target', mfe, mae, hours: (c.t - T) / 3600 };
-  }
-  const lastC = m5[Math.min(i, m5.length) - 1] ?? { c: entry };
-  return { exit: lastC.c, reason: 'timeout', mfe, mae, hours: maxH };
-}
-const R_of = (entry, stop, exit) => ((exit / entry - 1) - RR_COST) / ((entry - stop) / entry + RR_COST);
+const T0 = endSec - DAYS * 86400, T1 = endSec - 3 * 3600;
+const HORIZON_H = 48, SLIP = config.risk.slippagePct;
+const idx5 = (sym, T) => { const m5 = data[sym].m5; let lo = 0, hi = m5.length; while (lo < hi) { const m = (lo + hi) >> 1; if (m5[m].t < T) lo = m + 1; else hi = m; } return lo; };
+const after = (sym, T, hours) => { const m5 = data[sym].m5, i = idx5(sym, T), out = []; for (let j = i; j < m5.length && m5[j].t < T + hours * 3600; j++) out.push(m5[j]); return out; };
+const complete = (sym, T, hours) => { const m5 = data[sym].m5; return m5.length && m5[m5.length - 1].t >= T + hours * 3600 - 600; };
 
-const rows = [];       // one feature row per coin-hour with forward returns: input for scripts/research-factors.mjs
-function forward(sym, T, p0) {
-  const m5 = data[sym].m5; let i = 0, hi = m5.length;
-  while (i < hi) { const m = (i + hi) >> 1; if (m5[m].t < T) i = m + 1; else hi = m; }
-  if (!m5[i] || m5[m5.length - 1].t < T + 24 * 3600 - 600) return null;
-  const at = (h) => { const t = T + h * 3600 - 300; let j = i; while (j < m5.length - 1 && m5[j].t < t) j++; return m5[j].c / p0 - 1; };
-  let label = null, mfe = 0, mae = 0;
-  for (let j = i; j < m5.length && m5[j].t < T + 24 * 3600; j++) {
-    const c = m5[j]; mfe = Math.max(mfe, c.h / p0 - 1); mae = Math.min(mae, c.l / p0 - 1);
-    if (label == null) { if (c.l <= p0 * 0.98) label = 0; else if (c.h >= p0 * 1.04) label = 1; }
+/** first touch of target / stop for either direction (stop wins ties); R net of costs */
+function firstTouch(cs, entry, stop, target, dir, maxH) {
+  const sg = dir === 'short' ? -1 : 1, risk = Math.abs(entry - stop) / entry + RR_COST;
+  let last = entry, hit = 'timeout', n = 0;
+  for (const c of cs) {
+    if (n++ * 300 >= maxH * 3600) break;
+    last = c.c;
+    if (dir === 'long' ? c.l <= stop : c.h >= stop) { hit = 'stop'; last = stop; break; }
+    if (dir === 'long' ? c.h >= target : c.l <= target) { hit = 'target'; last = target; break; }
   }
-  return { r2: at(2), r6: at(6), r12: at(12), r24: at(24), mfe, mae, up4dn2: label };
+  return { hit, R: +((sg * (last / entry - 1) - RR_COST) / risk).toFixed(2) };
 }
+
+// ---- ONLINE replay: the probability model at hour T only knows observations whose 48h had already elapsed (no look-ahead)
+const tables = {}, pending = [], cands = [];
+let model = buildModel({}, []);
 let steps = 0;
 for (let T = T0; T <= T1; T += 3600) {
   steps++;
+  let changed = false;
+  while (pending.length && pending[0].T + HORIZON_H * 3600 <= T) {
+    const o = pending.shift();
+    if (o.use) { const t = (tables[`${o.side}:${o.setup}`] ??= { n: 0, hits: LEVELS.map(() => 0) }); t.n++; o.reach.forEach((r, i) => { if (r) t.hits[i]++; }); changed = true; }
+  }
+  if (changed) model = buildModel(tables, []);
+
   const ta = {}, px = {};
   for (const s of syms) {
     const d = data[s], m5 = upto(d.m5, 300, T, 300);
@@ -109,77 +107,82 @@ for (let T = T0; T <= T1; T += 3600) {
   const live = Object.keys(ta);
   const breadth = live.filter((s) => ta[s]['1h']?.trend.score >= 0.25).length / Math.max(1, live.length);
   const btcT = ta.BTC?.['1h'];
-  const btcGate = !!btcT && btcT.ema20 > btcT.ema50 && btcT.price > btcT.ema50;      // the live risk rule: BTC 1h EMA20 > EMA50 and price above the EMA50
+  const btcGate = !!btcT && btcT.ema20 > btcT.ema50 && btcT.price > btcT.ema50;
   const regime = brain.marketRegime({ btc: ta.BTC, eth: ta.ETH, breadth, btcGate });
   const chg = (s, hrs) => { const h1 = upto(data[s].h1, 3600, T, hrs + 2); return h1.length > hrs ? px[s] / h1[h1.length - 1 - hrs].c - 1 : 0; };
+  const med = (a) => { const x = a.slice().sort((p, q) => p - q); return x.length ? x[Math.floor(x.length / 2)] : 0; };
+  const c1 = Object.fromEntries(live.map((s) => [s, chg(s, 1)])), c24 = Object.fromEntries(live.map((s) => [s, chg(s, 24)]));
+  const rsEnv = { mkt1: med(Object.values(c1)), mkt24: med(Object.values(c24)), btc24: c24.BTC ?? 0, eth24: c24.ETH ?? 0 };
   for (const s of live) {
-    if (s === 'BTC' && false) continue;
-    const t = ta[s];
-    const dec = brain.decide({ symbol: s, ta: t, regime, news: null, market: null, book: null, chg24h: chg(s, 24), btcChg24h: chg('BTC', 24), smart: null, adj: [],
-      shape: (e, st, tg) => risk.shapeTrade(e, st, tg, { symbol: s, rank: syms.indexOf(s) + 1 }) });
-    const rec = { sym: s, T, action: dec.action, cls: dec.cls, score: dec.score, pUp: dec.pUp, setup: dec.setup?.name ?? null, vetoes: dec.vetoes.map((v) => v.code), hard: dec.vetoes.filter((v) => v.hard).map((v) => v.code), rr: dec.rr, btcGate };
-    if (dec.stop && dec.target && dec.setup) {            // EVERY candidate setup is scored (not only BUYs) so thresholds and vetoes can be judged on evidence
-      const entry = px[s] * (1 + config.risk.slippagePct), w = walk(s, T, entry, dec.stop, dec.target, Math.min(dec.holdHours * 2, 72));
-      Object.assign(rec, { kind: 'brain', R: R_of(entry, dec.stop, w.exit), reason: w.reason, mfe: w.mfe, mae: w.mae, hours: w.hours, stopDist: dec.stopDist });
+    const dec = brain.decide({ symbol: s, ta: ta[s], regime, news: null, market: null, book: null, chg1h: c1[s], chg24h: c24[s], rs: rsEnv, smart: null, adj: [], empirical: model, full: true,
+      selected: [], shape: (e, st, tg) => risk.shapeTrade(e, st, tg, { symbol: s, rank: syms.indexOf(s) + 1 }) });
+    for (const side of ['long', 'short']) {
+      const c = dec._both[side];
+      if (!c || !c.setup || c.entry == null || !c.stop || !c.target) continue;
+      const entry = px[s] * (1 + (side === 'long' ? 1 : -1) * SLIP), cs5 = after(s, T, 72);
+      if (!cs5.length || !complete(s, T, 6)) continue;
+      const ft = firstTouch(cs5, entry, c.stop, c.target, side, Math.min(c.holdHours * 2, 72));
+      const obs = observe(cs5, entry, c.stop, side, T, HORIZON_H * 3600, 300);
+      const rec = { sym: s, T, side, setup: c.setup.name, score: c.score, scores: c.scores, chase: c.chase && { verdict: c.chase.verdict, score: c.chase.score, atLevel: c.chase.atLevel }, vetoes: c.vetoes.map((v) => v.code), hard: c.vetoes.filter((v) => v.hard).map((v) => v.code),
+        action: c.action, pUp: c.pUp, pSample: c.pSample, targetR: c.targetR, rr: c.rr, stopDist: c.stopDist, regime: regime.label, severe: regime.severe, ft, reach: obs?.reach ?? null, maxR: obs?.maxR ?? null, matured: complete(s, T, HORIZON_H) };
+      cands.push(rec);
+      if (obs && rec.matured) pending.push({ T, side, setup: rec.setup, reach: obs.reach, use: rec.chase?.verdict !== 'chasing' });
     }
-    const fw = forward(s, T, px[s]);
-    if (fw) {
-      const h1 = t['1h'], m15 = t['15m'], h4 = t['4h'], d1 = t['1d'];
-      rows.push({ sym: s, T, score: dec.score, action: dec.action, setup: dec.setup?.name ?? null, hard: rec.hard, vetoes: rec.vetoes, f: dec.factors, regime: regime.score, btcGate,
-        x: { d1: d1?.trend.score ?? 0, h4: h4.trend.score, h1: h1.trend.score, m15: m15.trend.score, m5: t['5m'].trend.score, flow1: h1.flow.recent, flow15: m15.flow.recent, rvol15: m15.volume.rvol ?? 1, rvol1: h1.volume.rvol ?? 1, rsi1: h1.momentum.rsi ?? 50, ext1: h1.momentum.extensionAtr, ext15: m15.momentum.extensionAtr, roc6: h1.momentum.roc6, roc24: h1.momentum.roc24, atrPct: h1.atrPct, rs: chg(s, 24) - chg('BTC', 24), chg24: chg(s, 24), chg4: chg(s, 4),
-          boxPos: h1.box?.pos ?? -1, supDist: h1.levels.support ? (px[s] - h1.levels.support.price) / h1.atr : 9, resDist: h1.levels.resistance ? (h1.levels.resistance.price - px[s]) / h1.atr : 9, candle15: m15.candles.score, candle1: h1.candles.score, bullBreak1: h1.trend.bullBreak ? 1 : 0, demandShift1: h1.flow.shift === 'demand_takeover' ? 1 : h1.flow.shift === 'supply_takeover' ? -1 : 0 },
-        fw });
-    }
-    // baselines on identical stop/target geometry (3% stop, 7.5% target = 2.5R before costs): old-style flags-only entry, and "buy anyway" inside a downtrend
-    const flagsUp = (k) => t[k] && t[k].trend.score >= 0.25 && t[k].aboveEma20;
-    const base = (kind) => { const entry = px[s] * (1 + config.risk.slippagePct), stop = px[s] * 0.97, tg = px[s] * 1.075, w = walk(s, T, entry, stop, tg, 48); outcomes.push({ sym: s, T, kind, R: R_of(entry, stop, w.exit), reason: w.reason, btcGate }); };
-    if (btcGate && flagsUp('5m') && flagsUp('15m') && flagsUp('1h') && (T / 3600) % 3 === 0) base('baseline_flags_only');
-    if (btcGate && (t['4h'].trend.score <= -0.25 || t['1h'].trend.score <= -0.25) && t['15m'].trend.score >= 0.25 && (T / 3600) % 3 === 0) base('baseline_buy_in_downtrend');
-    if (rec.kind) outcomes.push(rec);
-    else if (JSON_OUT) outcomes.push(rec);
   }
 }
 
+/* ------------------------------------------------------------------ reports */
 const stat = (rows) => {
   const n = rows.length; if (!n) return { n: 0 };
-  const wins = rows.filter((r) => r.R > 0).length, sumR = rows.reduce((a, r) => a + r.R, 0);
-  const gp = rows.filter((r) => r.R > 0).reduce((a, r) => a + r.R, 0), gl = -rows.filter((r) => r.R <= 0).reduce((a, r) => a + r.R, 0);
-  return { n, win: +(wins / n).toFixed(2), tgt: +(rows.filter((r) => r.reason === 'target').length / n).toFixed(2), stop: +(rows.filter((r) => r.reason === 'stop').length / n).toFixed(2), avgR: +(sumR / n).toFixed(2), pf: gl > 0 ? +(gp / gl).toFixed(2) : null, totalR: +sumR.toFixed(1) };
+  const w = rows.filter((r) => r.ft.R > 0).length, sumR = rows.reduce((a, r) => a + r.ft.R, 0), mx = rows.filter((r) => r.maxR != null);
+  const rc = (L) => { const i = LEVELS.indexOf(L), m = rows.filter((r) => r.reach); return m.length ? +(m.filter((r) => r.reach[i]).length / m.length).toFixed(2) : null; };
+  return { n, tgt: +(rows.filter((r) => r.ft.hit === 'target').length / n).toFixed(2), stop: +(rows.filter((r) => r.ft.hit === 'stop').length / n).toFixed(2), win: +(w / n).toFixed(2), avgR: +(sumR / n).toFixed(2), meanMaxR: mx.length ? +(mx.reduce((a, r) => a + r.maxR, 0) / mx.length).toFixed(2) : null, reach1R: rc(1), reach2R: rc(2), reach2_5R: rc(2.5) };
 };
-const cands = outcomes.filter((o) => o.kind === 'brain').sort((a, b) => a.T - b.T);
-const buys = cands.filter((o) => o.action === 'BUY');
-const group = (rows, keyFn) => { const g = {}; for (const r of rows) for (const k of [].concat(keyFn(r))) (g[k] ??= []).push(r); return g; };
-const table = (title, g) => { console.log(title); for (const [k, v] of Object.entries(g).sort((a, b) => b[1].length - a[1].length)) console.log(`  ${String(k).padEnd(26)}`, JSON.stringify(stat(v))); };
-console.log(`BACKTEST: ${syms.length} coins, ${DAYS} days, ${steps} hourly steps`);
-console.log('BRAIN BUYs (every gate passed):', JSON.stringify(stat(buys)));
-console.log('ALL candidate setups (stop/target from structure, any veto):', JSON.stringify(stat(cands)));
-table('By setup (all candidates):', group(cands, (r) => r.setup));
-table('By score bucket (all candidates):', group(cands, (r) => (r.score >= 80 ? '80+' : r.score >= 70 ? '70-80' : r.score >= 60 ? '60-70' : r.score >= 50 ? '50-60' : '<50')));
-table('By HARD veto (a candidate with a hard veto is one the brain refuses):', group(cands, (r) => (r.hard.length ? r.hard : ['none'])));
-table('By SOFT veto present:', group(cands, (r) => r.vetoes.filter((v) => !r.hard.includes(v)).concat(r.vetoes.length ? [] : ['none'])));
-table('No hard veto, by score bucket:', group(cands.filter((r) => !r.hard.length), (r) => (r.score >= 80 ? '80+' : r.score >= 70 ? '70-80' : r.score >= 60 ? '60-70' : '<60')));
-table('No hard veto, BTC gate open, by score bucket:', group(cands.filter((r) => !r.hard.length && r.btcGate), (r) => (r.score >= 80 ? '80+' : r.score >= 70 ? '70-80' : r.score >= 60 ? '60-70' : '<60')));
-const elig = cands.filter((r) => !r.hard.length && r.rr >= config.risk.minRR);
-const half = (rows) => { const c = Math.floor(rows.length * config.brain.learnTrainFrac); return [rows.slice(0, c), rows.slice(c)]; };
-console.log('ELIGIBLE = no hard veto AND net R:R >= ' + config.risk.minRR + ' (the real entry criteria, before the score/probability thresholds):', JSON.stringify(stat(elig)));
-for (const [name, set] of [['all eligible', elig], ['eligible, BTC gate open', elig.filter((r) => r.btcGate)], ['eligible, score>=70', elig.filter((r) => r.score >= 70)], ['eligible, score>=60 gate open', elig.filter((r) => r.score >= 60 && r.btcGate)]]) { const [a, b] = half(set); console.log(`  ${name.padEnd(30)} train ${JSON.stringify(stat(a))}
-  ${''.padEnd(30)} test  ${JSON.stringify(stat(b))}`); }
-for (const k of Object.keys(group(elig, (r) => r.setup))) { const set = elig.filter((r) => r.setup === k), [a, b] = half(set); console.log(`  setup ${k.padEnd(22)} train ${JSON.stringify(stat(a))}  test ${JSON.stringify(stat(b))}`); }
-table('By stop distance (all candidates):', group(cands, (r) => (r.stopDist < 0.02 ? '<2%' : r.stopDist < 0.03 ? '2-3%' : '3-4%+')));
-const cut = Math.floor(buys.length * config.brain.learnTrainFrac);
-console.log('\nWALK-FORWARD (chronological): the first part is "train", the later part was never looked at to choose anything');
-console.log('  train:', JSON.stringify(stat(buys.slice(0, cut))));
-console.log('  test :', JSON.stringify(stat(buys.slice(cut))));
-console.log('\nBASELINES (same entries every 3h, 3% stop / 7.5% target):');
-console.log('  old-style flags only (5m+15m+1h trend flags, BTC gate):', JSON.stringify(stat(outcomes.filter((o) => o.kind === 'baseline_flags_only'))));
-console.log('  buying 15m strength INSIDE a 1h/4h downtrend           :', JSON.stringify(stat(outcomes.filter((o) => o.kind === 'baseline_buy_in_downtrend'))));
-const recs = outcomes.filter((o) => o.action);
-if (JSON_OUT) fs.writeFileSync(path.join(CACHE, `decisions-${DAYS}d.json`), JSON.stringify(recs));
-fs.writeFileSync(path.join(CACHE, `features-${DAYS}d.json`), JSON.stringify(rows));
-console.log(`features: ${rows.length} coin-hour rows saved for research-factors.mjs`);
-const all = {}; for (const r of recs) all[r.action] = (all[r.action] ?? 0) + 1;
-console.log('\nDecision mix (JSON mode only):', JSON.stringify(all));
-console.log('Veto frequency:'); const vc = {}; for (const r of recs) for (const v of r.vetoes) vc[v] = (vc[v] ?? 0) + 1; console.log(' ', JSON.stringify(Object.fromEntries(Object.entries(vc).sort((a, b) => b[1] - a[1]))));
-const sc = recs.map((r) => r.score).sort((a, b) => a - b);
-if (sc.length) console.log('Score distribution (all coin-hours): p50', sc[Math.floor(sc.length * 0.5)], 'p90', sc[Math.floor(sc.length * 0.9)], 'p99', sc[Math.floor(sc.length * 0.99)], 'max', sc[sc.length - 1]);
+const group = (rows, f) => { const g = {}; for (const r of rows) for (const k of [].concat(f(r))) (g[k] ??= []).push(r); return g; };
+const table = (title, g) => { console.log(title); for (const [k, v] of Object.entries(g).sort((a, b) => b[1].length - a[1].length)) console.log(`  ${String(k).padEnd(30)}`, JSON.stringify(stat(v))); };
+const halves = (rows) => { const s = rows.slice().sort((a, b) => a.T - b.T), c = Math.floor(s.length * config.brain.learnTrainFrac); return [s.slice(0, c), s.slice(c)]; };
+
+const longs = cands.filter((c) => c.side === 'long'), shorts = cands.filter((c) => c.side === 'short');
+console.log(`BACKTEST (online, no look-ahead): ${syms.length} coins, ${DAYS} days, ${steps} hourly steps. Candidates with a defined setup: ${longs.length} long, ${shorts.length} short.`);
+table('\nCandidates by setup (long+short):', group(cands, (r) => `${r.side}:${r.setup}`));
+
+console.log('\n=== ANTI-CHASING STUDY (long candidates; does entering after the move really do worse?) ===');
+table('By anti-chasing verdict (all):', group(longs, (r) => r.chase?.verdict ?? '?'));
+const [lA, lB] = halves(longs);
+table('  earlier 60%:', group(lA, (r) => r.chase?.verdict ?? '?')); table('  later 40% (unseen):', group(lB, (r) => r.chase?.verdict ?? '?'));
+table('By timing score:', group(longs, (r) => (r.scores.timing >= 80 ? 'timing 80+' : r.scores.timing >= 65 ? 'timing 65-80' : r.scores.timing >= 50 ? 'timing 50-65' : 'timing <50')));
+table('Same for shorts, by anti-chasing verdict:', group(shorts, (r) => r.chase?.verdict ?? '?'));
+
+console.log('\n=== PROBABILITY CALIBRATION, walk-forward (fit on the earlier 60%, scored on the later 40%; each observation x each R level) ===');
+const obsAll = cands.filter((c) => c.reach && c.matured && c.chase?.verdict !== 'chasing').sort((a, b) => a.T - b.T);
+const cut = Math.floor(obsAll.length * config.brain.learnTrainFrac), train = obsAll.slice(0, cut), test = obsAll.slice(cut);
+const tabFrom = (rows) => { const t = {}; for (const r of rows) { const x = (t[`${r.side}:${r.setup}`] ??= { n: 0, hits: LEVELS.map(() => 0) }); x.n++; r.reach.forEach((v, i) => { if (v) x.hits[i]++; }); } return t; };
+const mTrain = buildModel(tabFrom(train), []);
+let bM = 0, bP = 0, bB = 0, nn = 0, sumP = 0, sumY = 0; const baseTr = LEVELS.map((L, i) => train.filter((r) => r.reach[i]).length / Math.max(1, train.length));
+const bins = new Map();
+for (const r of test) LEVELS.forEach((L, i) => {
+  const y = r.reach[i] ? 1 : 0, p = mTrain.pReach(r.setup, r.side, L).p, pr = priorReach(L);
+  sumP += p; sumY += y; bM += (p - y) ** 2; bP += (pr - y) ** 2; bB += (baseTr[i] - y) ** 2; nn++;
+  const k = Math.min(0.9, Math.floor(p * 10) / 10), b = bins.get(k) ?? { n: 0, pred: 0, hit: 0 }; b.n++; b.pred += p; b.hit += y; bins.set(k, b);
+});
+const wf = nn ? { haircut: +Math.max(0.5, Math.min(1, sumY / sumP)).toFixed(3), trainObs: train.length, testObs: test.length, brierModel: +(bM / nn).toFixed(4), brierZeroDriftPrior: +(bP / nn).toFixed(4), brierTrainBaseRate: +(bB / nn).toFixed(4), bins: [...bins.entries()].sort((a, b) => a[0] - b[0]).map(([k, b]) => ({ range: `${(k * 100).toFixed(0)}-${(k * 100 + 10).toFixed(0)}%`, n: b.n, predicted: +(b.pred / b.n).toFixed(3), actual: +(b.hit / b.n).toFixed(3) })) } : null;
+if (wf) { console.log(`out-of-sample haircut (actual / predicted on the unseen part): ${wf.haircut}`);
+  console.log(`train ${wf.trainObs} / test ${wf.testObs} observations.  Brier (lower is better): fitted model ${wf.brierModel}  |  zero-drift prior ${wf.brierZeroDriftPrior}  |  train base rate ${wf.brierTrainBaseRate}`); console.log('  predicted vs actual on the unseen test part:'); for (const b of wf.bins) console.log(`   ${b.range.padEnd(8)} n=${String(b.n).padEnd(6)} predicted ${b.predicted}  actual ${b.actual}`); }
+console.log('Realistic R per setup (largest R reached at least ' + config.brain.minPUp * 100 + '% of the time, fitted on ALL matured observations):');
+const mAll = buildModel(tabFrom(obsAll), []);
+for (const k of Object.keys(tabFrom(obsAll)).sort()) { const [side, setup] = k.split(':'); console.log(`  ${k.padEnd(34)} n=${String(mAll.n(setup, side)).padEnd(5)} P(1R) ${mAll.pReach(setup, side, 1).p}  P(1.5R) ${mAll.pReach(setup, side, 1.5).p}  P(2.5R) ${mAll.pReach(setup, side, 2.5).p}  realistic ~${mAll.realisticR(setup, side, config.brain.minPUp)}R`); }
+
+console.log('\n=== THE FULL PIPELINE, ONLINE (probabilities learned only from already-matured outcomes) ===');
+const buys = cands.filter((c) => c.action === 'BUY'), sh = cands.filter((c) => c.action === 'SHORT');
+console.log(`LONG entries the Brain would have taken: ${JSON.stringify(stat(buys))}`);
+const [bA, bB2] = halves(buys); console.log(`  earlier: ${JSON.stringify(stat(bA))}\n  later  : ${JSON.stringify(stat(bB2))}`);
+console.log(`SHORT setups that passed every gate (detected, execution is OFF): ${JSON.stringify(stat(sh))}`);
+table('Long candidates that passed direction + timing (no geometry/probability yet):', group(longs.filter((c) => c.scores.direction >= config.brain.minDirection && c.scores.timing >= config.brain.minTiming && !c.hard.length), () => 'dir+timing ok, no hard veto'));
+table('Veto frequency among long candidates:', group(longs, (r) => r.vetoes));
+
+if (process.argv.includes('--calibrate')) {
+  saveHistorical({ builtAt: Date.now(), days: DAYS, rows: obsAll.length, coins: syms.length, tables: tabFrom(obsAll), walkForward: wf, note: 'observations = hypothetical trades at every defined setup (not chasing), walked forward on 5m candles; reach = hit +R before the stop within 48h' });
+  console.log(`\ncalibration written to logs/calibration.json (${obsAll.length} observations)`);
+}
+fs.writeFileSync(path.join(CACHE, `bt-candidates-${DAYS}d.json`), JSON.stringify(cands));
 process.exit(0);

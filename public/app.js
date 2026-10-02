@@ -47,7 +47,7 @@ function renderStats(s) {
     stat('Cash', money(p.cash)),
     stat('Realized P&L', money(p.realized_pnl), cls(p.realized_pnl)),
     stat('Today (UTC)', pct(p.dailyPnlPct), cls(p.dailyPnlPct)),
-    stat('BTC 1h regime', btc.toUpperCase(), btc === 'bullish' ? 'up' : btc === 'bearish' ? 'down' : 'warn'),
+    stat('BTC 1h EMA (info)', btc.toUpperCase(), btc === 'bullish' ? 'up' : btc === 'bearish' ? 'down' : 'warn'),
     `<a class="stat jump" href="#trade-history" title="Jump to Trade History"><b>${s.tradeCount ?? 0}</b><span>Trades ↓ history</span></a>`,
     stat('Open', `${s.positions.length}/${s.limits.maxPositions}`),
     stat('Feed', h.wsConnected ? (h.feedStale ? 'STALE' : 'LIVE') : 'OFFLINE', h.wsConnected && !h.feedStale ? 'up' : 'down'),
@@ -236,62 +236,88 @@ const sdText = (f) => (f ? `1h ${esc(String(f.h1).replace('_', ' '))}${f.h1shift
 const clsPill = (c) => `<span class="pill ${c === 'HOT' ? 'hotc' : c === 'AVOID' ? 'avoidc' : c === 'WATCH' ? 'amber' : ''}">${esc(c)}</span>`;
 const newsText = (n) => (n && n.events && n.events.length ? n.events.slice(0, 2).map((e) => `${esc(e.label)} <span class="${e.direction === 'bullish' ? 'up' : e.direction === 'bearish' ? 'down' : 'muted'}">${esc(e.direction)}</span> (${e.pricedIn === 'unknown' ? 'priced-in unknown' : e.pricedIn === 'no' ? 'not priced in' : 'priced in: ' + esc(e.pricedIn)})`).join('; ') : '<span class="muted">no relevant headline</span>');
 
-function oppCard(o) {
-  const buy = o.action === 'BUY';
-  const lv = (x) => (x == null ? '—' : price(x));
-  return `<div class="opp ${buy ? 'buy' : ''}" data-sym="${esc(o.symbol)}">
-    <h4>${esc(o.symbol)} <span class="muted" style="font-weight:400">${esc(o.name)}</span> <span class="pill ${buy ? 'good' : 'amber'}">${esc(o.action)}</span>${clsPill(o.cls)}${o.setup ? `<span class="pill own">${esc(o.setup)}</span>` : ''}
-      <span class="big"><b>${o.score}</b>/100 edge score<br>P(target first) ${(o.pUp * 100).toFixed(0)}% · EV ${o.ev == null ? '—' : o.ev + 'R'}</span></h4>
-    <div class="facts">
-      <span class="k">Signal</span><span>${esc(o.action)} · confidence = ${(o.pUp * 100).toFixed(0)}% <span class="muted">(${esc(o.pUpSource || '')})</span></span>
-      <span class="k">Trend</span><span class="tr">${trendTags(o.trend)}</span>
-      <span class="k">Supply/demand</span><span>${sdText(o.flow)}</span>
-      <span class="k">Candles</span><span>${o.candles && o.candles.length ? esc(o.candles.join(', ').replace(/_/g, ' ')) : '<span class="muted">no pattern</span>'}</span>
-      <span class="k">Volume</span><span>${o.volume ? `${(o.volume.rvol15 ?? 0).toFixed(1)}x (15m) · ${(o.volume.rvol1h ?? 0).toFixed(1)}x (1h)` : '—'}</span>
-      <span class="k">Momentum</span><span>${o.momentum ? `RSI ${o.momentum.rsi1h ?? '—'} · 6-bar ${pct(o.momentum.roc6)} · ${o.momentum.ext1h} ATR from mean${o.momentum.overextended ? ' <span class="warn">(extended)</span>' : ''}` : '—'}</span>
-      <span class="k">News effect</span><span>${newsText(o.news)}${o.news ? ` · net ${o.news.effect >= 0 ? '+' : ''}${o.news.effect}` : ''}</span>
-    </div>
-    <div class="plan"><span>entry <b>${lv(o.entry)}</b></span><span>stop <b class="down">${lv(o.stop)}</b></span><span>target <b class="up">${lv(o.target)}</b></span><span>R:R <b>${o.rr ?? '—'}</b></span><span>hold <b>${o.holdHours ? '~' + o.holdHours + 'h' : '—'}</b></span></div>
-    <ul>${(o.reasons || []).slice(0, 5).map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
-    ${o.waitingFor && o.waitingFor.length ? `<div class="wait"><b>Waiting for:</b> ${o.waitingFor.map(esc).join(' · ')}</div>` : ''}
-    ${o.vetoes && o.vetoes.length ? `<div class="why"><b>Blocked by:</b> ${o.vetoes.slice(0, 3).map(esc).join(' · ')}</div>` : ''}
-    ${o.adjustments && o.adjustments.length ? `<div class="why"><b>Learned rules applied:</b> ${o.adjustments.map((a) => esc(a.why) + ' (' + (a.delta > 0 ? '+' : '') + a.delta + ')').join('; ')}</div>` : ''}
-  </div>`;
-}
-
 function renderBrain(b) {
   if (!b) return;
+  ruleSet = b.rules;
   const rg = b.regime;
   const chip = (label, val, c = '') => `<div class="chip"><b class="${c}">${val}</b><span>${label}</span></div>`;
   const rc = !rg ? 'warn' : rg.score >= 0.25 ? 'up' : rg.score <= -0.25 ? 'down' : 'warn';
-  $('#regime').innerHTML = rg ? `<div class="chips" style="padding:0 0 8px;border:0">${chip('Regime', esc(rg.label.replace(/_/g, ' ')), rc)}${chip('Score', rg.score, rc)}${chip('Breadth', b.breadth == null ? '—' : (b.breadth * 100).toFixed(0) + '%')}${chip('Coins analysed', b.analysed)}${chip('BUY', b.counts.BUY || 0, 'up')}${chip('HOT', b.counts.HOT || 0)}${chip('WATCH', b.counts.WATCH || 0)}${chip('AVOID', b.counts.AVOID || 0, 'down')}${chip('News effect', b.market ? (b.market.effect >= 0 ? '+' : '') + b.market.effect : '—', b.market && b.market.effect < -0.15 ? 'down' : b.market && b.market.effect > 0.15 ? 'up' : '')}</div>
+  $('#regime').innerHTML = rg ? `<div class="chips" style="padding:0 0 8px;border:0">${chip('Regime', esc(rg.label.replace(/_/g, ' ')), rc)}${chip('Score', rg.score, rc)}${chip('Breadth', b.breadth == null ? '—' : (b.breadth * 100).toFixed(0) + '%')}${chip('Coins analysed', b.analysed)}${chip('LONG', b.counts.BUY || 0, 'up')}${chip('SHORT', b.counts.SHORT || 0, 'down')}${chip('WAIT', b.counts.WAIT || 0)}${chip('AVOID', b.counts.AVOID || 0, 'down')}${chip('News effect', b.market ? (b.market.effect >= 0 ? '+' : '') + b.market.effect : '—', b.market && b.market.effect < -0.15 ? 'down' : b.market && b.market.effect > 0.15 ? 'up' : '')}</div>
     ${rg.notes.map((n) => `<p class="muted" style="margin:2px 0">${esc(n)}</p>`).join('')}
+    <p class="muted" style="margin:4px 0">Regime is a <b>modifier</b>: probability ${rg.probShiftLong >= 0 ? '+' : ''}${((rg.probShiftLong || 0) * 100).toFixed(1)}pt for longs, size ${rg.riskMult}x${rg.severe ? ' · <span class="down">SEVERE: new longs blocked</span>' : ''}.</p>
+    ${b.funnel ? `<h3 style="margin:10px 0 4px;font-size:12px" class="muted">OPPORTUNITY FUNNEL</h3><div class="funnel">${[['Monitored', b.funnel.monitored], ['Liquid', b.funnel.liquid], ['Tradable', b.funnel.tradable], ['Quality', b.funnel.quality], ['RS movers', b.funnel.relStrengthMovers], ['Shortlist', b.funnel.shortlist], ['Deep analysis', b.funnel.deep], ['Setups', b.funnel.setups], ['Ready', b.funnel.ready]].map(([k, v]) => `<span><b>${(v ?? 0).toLocaleString('en-US')}</b>${k}</span>`).join('<em>›</em>')}</div>` : ''}
     <h3 style="margin:10px 0 4px;font-size:12px" class="muted">NEWS EVENTS READ <span class="muted" style="font-weight:400">what happened → affected coins → direction → strength → priced in?</span></h3>
     ${b.events && b.events.length ? b.events.slice(0, 8).map((e) => `<div class="item" style="padding:5px 0"><span class="pill ${e.direction === 'bullish' ? 'good' : e.direction === 'bearish' ? 'bad' : ''}">${esc(e.direction)}</span> <b>${esc(e.label)}</b> <span class="muted">· ${e.scope === 'market' ? 'whole market' : esc((e.coins || []).join(', '))} · strength ${e.strength} · lasts ~${e.durationHours}h · ${e.ageHours == null ? 'age ?' : e.ageHours + 'h ago'} · tier ${e.tier}</span><div class="muted">${esc(e.what)}</div></div>`).join('') : '<div class="muted">No headline matched a known market-moving pattern in the last day.</div>'}`
     : '<div class="empty">Waiting for the first scan…</div>';
   $('#risks').innerHTML = (b.risks || []).length ? b.risks.map((r) => `<div class="item"><span class="sev ${r.severity >= 0.7 ? 'hi' : ''}"><b style="width:${Math.round(r.severity * 100)}%"></b></span><span class="pill ${r.severity >= 0.7 ? 'bad' : 'amber'}">${esc(r.kind)}</span> ${esc(r.text)}</div>`).join('') : '<div class="empty">No elevated risks detected.</div>';
   const opps = b.opportunities || [];
-  $('#opp-note').textContent = opps.length ? `${opps.filter((o) => o.action === 'BUY').length} BUY · ${opps.filter((o) => o.action !== 'BUY').length} WATCH/HOT · ${b.analysed} coins analysed · stays in cash when nothing has an edge` : 'stays in cash when nothing has an edge';
+  $('#opp-note').textContent = opps.length ? `${opps.filter((o) => o.action === 'BUY').length} LONG · ${opps.filter((o) => o.action === 'SHORT').length} SHORT · ${opps.filter((o) => o.action === 'WATCH').length} WAIT · ${b.analysed} coins analysed · WAIT is the default: a good direction needs a good entry price` : 'stays in cash when nothing has an edge';
   $('#opps').innerHTML = opps.length ? opps.slice(0, 18).map(oppCard).join('') : '<div class="empty" style="grid-column:1/-1">No coin has a setup right now. The AI is waiting instead of forcing a trade: that is the correct state when there is no edge.</div>';
   $('#avoid').innerHTML = (b.avoid || []).length ? b.avoid.map((o) => `<div class="item" data-sym="${esc(o.symbol)}" style="cursor:pointer"><div class="meta"><b>${esc(o.symbol)}</b>${clsPill('AVOID')}<span class="tr">${trendTags(o.trend)}</span><span>score ${o.score}</span></div><div class="why">${esc((o.vetoes || []).slice(0, 2).join(' · '))}</div></div>`).join('') : '<div class="empty">Nothing flagged.</div>';
   renderLearning(b.learning, b.rules, b.positions);
+}
+
+let ruleSet = null;
+const verdictPill = (o) => `<span class="pill ${o.verdict === 'LONG' ? 'good' : o.verdict === 'SHORT' ? 'bad' : 'amber'}">${esc(o.verdict || o.action)}</span>`;
+const scoreBar = (label, v, min) => `<div class="sc ${v >= min ? 'ok' : 'low'}"><span>${label}</span><b>${v == null ? '—' : v}</b><i><u style="width:${Math.max(0, Math.min(100, v || 0))}%"></u><s style="left:${min}%"></s></i></div>`;
+const chaseText = (c) => (c ? `<span class="${c.verdict === 'fresh' ? 'up' : c.verdict === 'late' ? 'warn' : 'down'}"><b>${esc(c.verdict)}</b></span> (score ${c.score}): ${c.moveAtr} ATR moved in 12 bars · ${c.distLevelAtr} ATR from the level · ${(c.expectedMoveUsed * 100).toFixed(0)}% of the move used${c.atLevel ? ' · <i>back at the level (retest)</i>' : ''}${c.spikeSpent ? ' · volume spike already spent' : ''}${c.stretched ? ' · stretched' : ''}` : '—');
+const rsText = (r) => (r ? `${pct(r.vs1h)} vs market (1h) · ${pct(r.vsBTC24)} vs BTC · ${pct(r.vsETH24)} vs ETH · ${pct(r.vsMkt24)} vs market (24h)` : '—');
+const whyList = (w) => (w ? [['Why this coin', w.coin], ['Why this direction', w.direction], ['Why this price', w.price], ['Why NOW', w.now && w.now.length ? w.now : ['<span class="down">no concrete reason to enter at this price right now: WAIT</span>']], ['What confirms it', w.confirms], ['What invalidates it', w.invalidates], ['What could make it fail', w.failure]]
+  .filter(([, a]) => a && a.length).map(([k, a]) => `<div class="wy"><span class="k">${k}</span><span>${a.map((x) => (String(x).startsWith('<span') ? x : esc(x))).join(' · ')}</span></div>`).join('') : '');
+
+function oppCard(o) {
+  const live = o.action === 'BUY' || o.action === 'SHORT';
+  const lv = (x) => (x == null ? '—' : price(x));
+  const sc = o.scores || {}, R = ruleSet || { minDirection: 62, minTiming: 65, minGeometry: 55 };
+  return `<div class="opp ${live ? 'buy' : ''}" data-sym="${esc(o.symbol)}">
+    <h4>${esc(o.symbol)} <span class="muted" style="font-weight:400">${esc(o.name)}</span> ${verdictPill(o)}${clsPill(o.cls)}${o.setup ? `<span class="pill own">${esc(o.setup)}</span>` : ''}
+      <span class="big"><b>${o.score}</b> weakest of the 3<br>P(target first) ${(o.pUp * 100).toFixed(0)}% · EV ${o.ev == null ? '—' : o.ev + 'R'}</span></h4>
+    <div class="scs">${scoreBar('Direction', sc.direction, R.minDirection)}${scoreBar('Timing', sc.timing, R.minTiming)}${scoreBar('Geometry', sc.geometry, R.minGeometry)}</div>
+    <div class="facts">
+      <span class="k">Signal</span><span>${esc(o.verdict || o.action)} · confidence ${(o.pUp * 100).toFixed(0)}% <span class="muted">(${esc(o.pUpSource || '')})</span></span>
+      <span class="k">Trend</span><span class="tr">${trendTags(o.trend)}</span>
+      <span class="k">Supply/demand</span><span>${sdText(o.flow)}${o.families ? ` · independent families agreeing: ${o.families.count} (${esc((o.families.agree || []).join(', ') || 'none')})` : ''}</span>
+      <span class="k">Candles</span><span>${o.candles && o.candles.length ? esc(o.candles.join(', ').replace(/_/g, ' ')) : '<span class="muted">no pattern</span>'}</span>
+      <span class="k">Volume</span><span>${o.volume ? `${(o.volume.rvol15 ?? 0).toFixed(1)}x (15m) · ${(o.volume.rvol1h ?? 0).toFixed(1)}x (1h)` : '—'}</span>
+      <span class="k">Momentum</span><span>${o.momentum ? `RSI ${o.momentum.rsi1h ?? '—'} · 6-bar ${pct(o.momentum.roc6)} · ${o.momentum.ext1h} ATR from mean${o.momentum.overextended ? ' <span class="warn">(extended)</span>' : ''} <span class="muted">(one family: not counted as confirmation)</span>` : '—'}</span>
+      <span class="k">Relative strength</span><span>${rsText(o.relStrength)}</span>
+      <span class="k">Anti-chasing</span><span>${chaseText(o.chase)}</span>
+      <span class="k">News effect</span><span>${newsText(o.news)}${o.news ? ` · net ${o.news.effect >= 0 ? '+' : ''}${o.news.effect}` : ''}</span>
+    </div>
+    <div class="plan"><span>entry zone <b>${o.entryZone ? lv(o.entryZone.lo) + '–' + lv(o.entryZone.hi) : '—'}</b></span><span>stop <b class="down">${lv(o.stop)}</b></span><span>target <b class="up">${lv(o.target)}</b></span><span>R:R <b>${o.rr ?? '—'}</b></span><span>needs <b>${o.targetR ?? '—'}R</b> (history: ~${o.realisticR ?? '—'}R)</span><span>hold <b>${o.holdHours ? '~' + o.holdHours + 'h' : '—'}</b></span></div>
+    <div class="whyblock">${whyList(o.why)}</div>
+    ${o.waitingFor && o.waitingFor.length ? `<div class="wait"><b>WAITING FOR:</b> ${o.waitingFor.map(esc).join(' · ')}</div>` : ''}
+    ${o.vetoes && o.vetoes.length ? `<div class="why"><b>Blocked by:</b> ${o.vetoes.slice(0, 4).map(esc).join(' · ')}</div>` : ''}
+    ${o.other && o.other.setup ? `<div class="why"><b>Other side (${esc(o.other.side)}):</b> ${esc(o.other.verdict)} · ${esc(o.other.setup)} · direction ${o.other.scores.direction}</div>` : ''}
+    ${o.adjustments && o.adjustments.length ? `<div class="why"><b>Learned rules applied:</b> ${o.adjustments.map((a) => esc(a.why) + ' (' + (a.delta > 0 ? '+' : '') + a.delta + ')').join('; ')}</div>` : ''}
+  </div>`;
 }
 
 function renderLearning(L, rules, positions) {
   if (!L) return;
   const st = (x) => (x && x.n ? `${x.n} measured · win rate ${(x.winRate * 100).toFixed(0)}% · avg ${x.avgR >= 0 ? '+' : ''}${x.avgR}R · target first ${(x.targetFirst * 100).toFixed(0)}% · avg best ${pct(x.avgMfe)} / worst ${pct(x.avgMae)}` : 'none measured yet');
   const rows = (arr, f) => (arr && arr.length ? arr.map(f).join('') : '');
+  const rel = L.reliability, lc = L.lossClusters, nw = L.news, hist = L.historical;
   $('#learning').innerHTML = `<div class="rep">
     ${L.sufficiency && L.sufficiency.length ? L.sufficiency.map((n) => `<p class="note">⚠ ${esc(n)}</p>`).join('') : ''}
-    <p class="muted">Decision rules in force: BUY needs score ≥ ${rules.minScore}, P(target first) ≥ ${(rules.minPUp * 100).toFixed(0)}%, EV ≥ ${rules.minEV}R, net R:R ≥ ${rules.minRR} and no veto. Tracked traders: ${esc(rules.copyTrading)}.</p>
+    <p class="muted">Entry rules in force: LONG needs direction ≥ ${rules.minDirection}, timing ≥ ${rules.minTiming} and geometry ≥ ${rules.minGeometry} <b>each</b>, chase score < ${rules.chaseVeto}, P(target first) ≥ ${(rules.minPUp * 100).toFixed(0)}%, EV ≥ ${rules.minEV}R, net R:R ≥ ${rules.minRR}, no veto, and a concrete "why now". Tracked traders: ${esc(rules.copyTrading)}.</p>
     <h3>Open positions: HOLD / SELL</h3>${positions && positions.length ? positions.map((p) => `<p><b>${esc(p.symbol)}</b> <span class="pill ${p.action === 'SELL' ? 'bad' : 'good'}">${esc(p.action)}</span> ${esc(p.reasons[0] || '')}${p.invalidation ? ` <span class="muted">(thesis breaks below ${price(p.invalidation)})</span>` : ''}</p>`).join('') : '<p class="muted">No open positions.</p>'}
     <h3>Real paper trades</h3><p>${st(L.trades)}</p>
-    <h3>Every journaled setup, traded or not (counterfactual, measured from real candles)</h3><p>${st(L.counterfactual)} · ${L.pending} waiting to mature</p>
-    <table class="mini"><thead><tr><th>Edge score</th><th class="r">n</th><th class="r">Win</th><th class="r">Avg R</th><th class="r">Target first</th></tr></thead><tbody>${rows(L.calibration, (c) => `<tr><td>${esc(c.label)}</td><td class="r">${c.n}</td><td class="r">${c.n ? (c.winRate * 100).toFixed(0) + '%' : '—'}</td><td class="r ${cls(c.avgR)}">${c.n ? c.avgR : '—'}</td><td class="r">${c.n ? (c.targetFirst * 100).toFixed(0) + '%' : '—'}</td></tr>`)}</tbody></table>
+    <h3>Counterfactuals: every setup AND every coin the brain declined, measured from real candles</h3>
+    <p>${st(L.counterfactual)} · ${L.pending} waiting to mature</p>
+    ${L.byKind ? `<p class="muted">evaluated setups ${L.byKind.decisions} · declined coins (plain ATR plan) ${L.byKind.ignored}: ${st(L.byKind.ignoredStats)}<br>longs: ${st(L.byKind.longs)}<br>shorts (not executed): ${st(L.byKind.shorts)}</p>` : ''}
+    <h3>Probability: predicted vs actual (with sample sizes)</h3>
+    <p class="muted">History file: ${hist ? `${hist.rows.toLocaleString('en-US')} walk-forward observations over ${hist.days} days${hist.walkForward ? ` · unseen-data Brier ${hist.walkForward.brierModel} (zero-drift prior ${hist.walkForward.brierZeroDriftPrior}, base rate ${hist.walkForward.brierTrainBaseRate})` : ''}` : 'none yet (run npm run calibrate)'}.</p>
+    ${rel && rel.n ? `<p>Live record: ${rel.n} measured, Brier ${rel.brier} (always-predict-the-base-rate: ${rel.baseBrier}), base rate ${(rel.baseRate * 100).toFixed(0)}%</p><table class="mini"><thead><tr><th>Predicted</th><th class="r">n</th><th class="r">Mean predicted</th><th class="r">Actually hit</th></tr></thead><tbody>${rel.bins.map((b) => `<tr><td>${b.range}</td><td class="r">${b.n}</td><td class="r">${(b.predicted * 100).toFixed(0)}%</td><td class="r">${(b.actual * 100).toFixed(0)}%</td></tr>`).join('')}</tbody></table>` : '<p class="muted">No measured live predictions yet: the probabilities are not yet proven on this record.</p>'}
+    <h3>Loss clusters: repeated causes of losses (hypotheses for a human, never auto-applied)</h3>
+    ${lc && lc.clusters && lc.clusters.length ? `<table class="mini"><thead><tr><th>Cause</th><th class="r">Losses</th><th class="r">Lift</th><th class="r">Avg R</th><th>Consistent?</th></tr></thead><tbody>${lc.clusters.slice(0, 8).map((c) => `<tr title="${esc(c.hypothesis || '')}"><td>${esc(c.tag)}${c.flagged ? ' <span class="pill bad">cluster</span>' : ''}</td><td class="r">${c.losses}/${c.entries}</td><td class="r">${c.lift}x</td><td class="r ${cls(c.avgR)}">${c.avgR}</td><td class="muted">${c.persistent ? 'both halves' : '—'}</td></tr>`).join('')}</tbody></table>${lc.clusters.filter((c) => c.hypothesis).map((c) => `<p class="note">${esc(c.hypothesis)}</p>`).join('')}` : `<p class="muted">${esc((lc && lc.note) || 'No clusters yet.')}</p>`}
+    <h3>News: did price actually react? (event → expected direction → reaction)</h3>
+    ${nw && nw.rows.length ? `<table class="mini"><thead><tr><th>Headline type</th><th class="r">n</th><th class="r">Moved as expected</th><th class="r">Avg move (ATR)</th><th class="r">Delay</th><th>Weight</th></tr></thead><tbody>${nw.rows.map((r) => `<tr title="${esc(r.note)}"><td>${esc(r.label)}</td><td class="r">${r.n}</td><td class="r">${(r.alignedRate * 100).toFixed(0)}%</td><td class="r">${r.meanAlignedAtr}</td><td class="r">${r.avgDelayH == null ? '—' : r.avgDelayH + 'h'}</td><td><span class="pill ${r.status === 'predictive' ? 'good' : r.status === 'not predictive' ? 'bad' : ''}">${esc(r.status)} · ${r.trust}x</span></td></tr>`).join('')}</tbody></table>` : ''}
+    <p class="muted">${nw ? `${nw.logged} events logged, ${nw.measured} with a measured 4h reaction. Until a headline type is measured to work, its weight is 0.5x; a reaction is a measurement, not proof the article caused it.` : ''}</p>
     <h3>Rules learned (walk-forward validated: same sign on an earlier AND a later slice of time)</h3>
     ${L.rules && L.rules.length ? `<table class="mini"><thead><tr><th>Rule</th><th>Status</th><th class="r">Train</th><th class="r">Test</th><th class="r">Score</th></tr></thead><tbody>${L.rules.map((r) => `<tr title="${esc(r.why)}"><td>${esc(r.desc)}</td><td><span class="pill ${r.status === 'active' ? 'good' : ''}">${esc(r.status)}</span></td><td class="r">${r.trainR}R (${r.nTrain})</td><td class="r">${r.testR}R (${r.nTest})</td><td class="r">${r.delta ? (r.delta > 0 ? '+' : '') + r.delta : '—'}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">No buckets have samples yet.</p>'}
     <h3>Do the vetoes earn their keep? (what the setups they blocked actually did)</h3>
-    ${L.vetoes && L.vetoes.length ? `<table class="mini"><thead><tr><th>Veto</th><th class="r">Blocked</th><th class="r">Avg R</th><th class="r">Missed big moves</th><th>Verdict</th></tr></thead><tbody>${L.vetoes.slice(0, 8).map((v) => `<tr><td>${esc(v.text)}</td><td class="r">${v.blocked}</td><td class="r ${cls(v.avgR)}">${v.avgR}</td><td class="r">${v.missedMoves}</td><td class="muted">${esc(v.verdict)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Needs 5+ measured blocked setups per veto.</p>'}
+    ${L.vetoes && L.vetoes.length ? `<table class="mini"><thead><tr><th>Veto</th><th class="r">Blocked</th><th class="r">Avg R</th><th class="r">Missed big moves</th><th>Verdict</th></tr></thead><tbody>${L.vetoes.slice(0, 10).map((v) => `<tr><td>${esc(v.text)}</td><td class="r">${v.blocked}</td><td class="r ${cls(v.avgR)}">${v.avgR}</td><td class="r">${v.missedMoves}</td><td class="muted">${esc(v.verdict)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Needs 5+ measured blocked setups per veto.</p>'}
     <h3>Missed opportunities: "a coin went up and the AI did not catch it earlier"</h3>
     ${L.missed && L.missed.list.length ? `<p class="muted">${L.missed.count} moves of ≥ 8% in the last 24h · flagged early on ${L.missed.early}. Most common reasons: ${L.missed.topReasons.slice(0, 3).map((r) => `${esc(r.text)} (${r.n})`).join('; ')}.</p>${L.missed.list.map((m) => `<p>• ${esc(m.text)}</p>`).join('')}` : '<p class="muted">No coin moved ≥ 8% in a way we can review yet (checked every 30 minutes).</p>'}
     <h3>Last closed trades: why they won or lost</h3>

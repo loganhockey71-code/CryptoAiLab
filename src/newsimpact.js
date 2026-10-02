@@ -111,21 +111,23 @@ export function pricedIn(event, sincePct, atrPct) {
  * Net effect of the events on ONE coin. effect in -1..1 (what the Brain adds to its score), dangerous = a fresh, strong, negative event the Brain must not trade into.
  * moveSince(publishedAt) -> fraction move of the coin since then (or null). Events already priced in count for less; bullish events that are priced in on a sellTheNews rule count as 0.
  */
-export function coinImpact(events, coin, moveSince, atrPct) {
+export function coinImpact(events, coin, moveSince, atrPct, trust = () => 0.5) {
   const rel = events.filter((e) => e.scope === 'market' || e.coins.includes(coin.symbol));
-  let sum = 0, danger = null;
+  let sum = 0, danger = null, bullish = null;
   const used = rel.map((e) => {
     const d = decayed(e);
     const pi = e.publishedAt && moveSince ? pricedIn(e, moveSince(e.publishedAt), atrPct) : 'unknown';
     const pm = pi === 'yes' ? (e.dir > 0 && e.sellTheNews ? 0 : 0.35) : pi === 'partly' ? 0.65 : 1;
-    const contrib = e.dir * d * pm;
+    const tr = trust(e.rule);                                     // measured usefulness of THIS kind of headline (default 0.5 until history validates it)
+    const contrib = e.dir * d * pm * tr;
     sum += contrib;
     const officialOrCorroborated = e.tier === 3 || (e.corroboratedBy ?? 0) >= 1;
     const canVeto = e.scope === 'market' ? d >= 0.55 && officialOrCorroborated : d >= 0.45;      // one unofficial headline can never veto the whole market
     if (e.dir < 0 && canVeto && !e.hedged && pi !== 'yes') danger = danger && danger.d >= d ? danger : { d, why: `${e.label}: "${e.what.slice(0, 90)}"` };
-    return { what: e.what, label: e.label, scope: e.scope, direction: e.direction, strength: +d.toFixed(2), durationHours: e.durationHours, ageHours: e.ageHours, pricedIn: pi, source: e.source, tier: e.tier, effect: +contrib.toFixed(2) };
+    if (e.dir > 0 && d >= 0.45 && !e.hedged && pi !== 'yes' && (e.scope === 'coin' || e.tier === 3)) bullish = bullish && bullish.d >= d ? bullish : { d, why: `${e.label}: "${e.what.slice(0, 90)}"` };
+    return { rule: e.rule, trust: tr, what: e.what, label: e.label, scope: e.scope, direction: e.direction, strength: +d.toFixed(2), durationHours: e.durationHours, ageHours: e.ageHours, pricedIn: pi, source: e.source, tier: e.tier, effect: +contrib.toFixed(2) };
   }).filter((e) => e.strength > 0.05);
-  return { effect: +Math.max(-1, Math.min(1, sum)).toFixed(2), dangerous: !!danger, danger: danger?.why ?? null, events: used.sort((a, b) => Math.abs(b.effect) - Math.abs(a.effect)).slice(0, 6) };
+  return { effect: +Math.max(-1, Math.min(1, sum)).toFixed(2), dangerous: !!danger, danger: danger?.why ?? null, bullishDanger: bullish?.why ?? null, events: used.sort((a, b) => Math.abs(b.effect) - Math.abs(a.effect)).slice(0, 6) };
 }
 
 /** Market-wide read: net direction of every market-scope event plus macro readings from FRED (oil, dollar, VIX, yields) when available. */
@@ -141,4 +143,23 @@ export function marketImpact(events, macro) {
   if (m?.us10y_yield && m?.us2y_yield && m.us2y_yield.value > m.us10y_yield.value) risks.push({ kind: 'macro', text: `yield curve inverted (2y ${m.us2y_yield.value}% > 10y ${m.us10y_yield.value}%)`, severity: 0.25, source: 'FRED' });
   const macroTilt = (m?.vix?.value >= 25 ? -0.3 : 0) + (m?.oil?.changePct >= 5 ? -0.1 : 0) + (m?.dollar?.changePct >= 1 ? -0.1 : 0);
   return { effect: +Math.max(-1, Math.min(1, net + macroTilt)).toFixed(2), risks, eventCount: mk.length };
+}
+
+/**
+ * What did price ACTUALLY do after an event? bars = hourly { t (s), c } for the affected asset (market-wide events: BTC), ref = the same for a benchmark (BTC for coin events, so a coin-specific
+ * headline is judged on its move BEYOND the market). Returns the reaction at +1h/+4h/+24h, its size in ATRs, the delay until the first meaningful move, and whether it matched the expected direction.
+ * A reaction is a measurement, never proof of causation: the learner needs many events before it trusts a headline type.
+ */
+export function measureReaction(event, bars, ref, atrPct, now = Date.now()) {
+  if (!event.publishedAt || !bars?.length) return null;
+  const pubS = event.publishedAt / 1000;
+  const px = (arr, tS) => { let v = null; for (const b of arr) if (b.t + 3600 <= tS) v = b.c; return v; };   // last completed hourly close at or before tS
+  const p0 = px(bars, pubS); if (!p0) return null;
+  const r0 = ref ? px(ref, pubS) : null;
+  const at = (h) => { if (pubS + h * 3600 > now / 1000) return null; const p = px(bars, pubS + h * 3600); if (!p) return null; const raw = p / p0 - 1, rr = ref && r0 ? px(ref, pubS + h * 3600) / r0 - 1 : null; return rr == null ? raw : raw - rr; };
+  const r1 = at(1), r4 = at(4), r24 = at(24), unit = Math.max(atrPct ?? 0.01, 0.004);
+  let delayH = null;
+  for (const b of bars) { if (b.t + 3600 <= pubS) continue; const m = Math.abs(b.c / p0 - 1); if (m >= 0.5 * unit) { delayH = +((b.t + 3600 - pubS) / 3600).toFixed(1); break; } }
+  const aligned = r4 == null || event.dir === 0 ? null : Math.sign(r4) === event.dir;
+  return { r1, r4, r24, magAtr: r4 == null ? null : +(Math.abs(r4) / unit).toFixed(2), alignedMagAtr: r4 == null || event.dir === 0 ? null : +((r4 * event.dir) / unit).toFixed(2), delayH, aligned, complete4: r4 != null, complete24: r24 != null };
 }

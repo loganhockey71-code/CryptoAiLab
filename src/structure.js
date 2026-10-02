@@ -32,7 +32,8 @@ function trendOf(done, price, a, piv, e20, e50, slope50) {
   s += clamp(slope50 / 3, -0.05, 0.05);
   s = clamp(s, -1, 1);
   const state = s >= 0.6 ? 'strong_up' : s > 0.25 ? 'up' : s <= -0.6 ? 'strong_down' : s < -0.25 ? 'down' : 'range';
-  const lastHigh = last(piv.highs)?.p ?? null, lastLow = last(piv.lows)?.p ?? null;
+  const confirmedHighs = piv.highs.filter((x) => !x.provisional), confirmedLows = piv.lows.filter((x) => !x.provisional);
+  const lastHigh = last(confirmedHighs)?.p ?? null, lastLow = last(confirmedLows)?.p ?? null;
   const closeNow = last(done).c;
   // Break of structure: a downtrend whose last lower-high is taken out (early reversal), or an uptrend whose last higher-low is lost (early weakness).
   const bullBreak = (lh || ll || s < 0) && lastHigh != null && closeNow > lastHigh;
@@ -80,7 +81,7 @@ function boxOf(done, price, a, n = 36) {
       } else if (price <= hi) { out.fakeUp = true; out.state = 'fake_breakout_up'; }       // closed above, then fell back inside: a bull trap
     } else if (dnIdx >= 0) {
       const tail = after.slice(dnIdx);
-      if (price < lo && tail.every((x) => x.c < lo + 0.1 * a)) { out.brokeDown = true; out.state = 'breakdown'; out.barsSinceBreak = after.length - dnIdx; }
+      if (price < lo && tail.every((x) => x.c < lo + 0.1 * a)) { out.brokeDown = true; out.state = 'breakdown'; out.barsSinceBreak = after.length - dnIdx; out.extensionAtr = +((lo - price) / a).toFixed(2); out.retest = tail.slice(1).some((x) => x.h >= lo - 0.3 * a && x.c <= lo + 0.1 * a); }   // retest = price came back up to the old range low and failed there
       else if (price >= lo) { out.fakeDown = true; out.state = 'fake_breakdown'; }          // closed below, then reclaimed: a bear trap
     }
     if (out.state === 'inside' && after.some((x) => x.l < lo - 0.05 * a && x.c > lo)) { out.fakeDown = true; out.state = 'liquidity_sweep_low'; }   // wick below the range, closed back inside
@@ -180,6 +181,26 @@ function momentumOf(done, price, a, e20) {
   return { rsi: r != null ? +r.toFixed(1) : null, macdHist: m?.hist ?? null, macdRising: m && m.prevHist != null ? m.hist > m.prevHist : null, roc3: +roc(3).toFixed(4), roc6: +roc(6).toFixed(4), roc24: +roc(24).toFixed(4), extensionAtr: +ext.toFixed(2), overextended: ext > 3.5 || (r != null && r > 82), score: +clamp(s, -1, 1).toFixed(2) };
 }
 
+/**
+ * What has ALREADY happened (anti-chasing inputs): run-up / drop over the last bars in ATRs, where the biggest volume spike of the last 12 bars was and how far price travelled since it,
+ * and how far price is from the latest swing low / high. All from completed bars; nothing here predicts, it only measures the move that is already behind us.
+ */
+function recentOf(done, price, a, piv) {
+  const w6 = done.slice(-6), w12 = done.slice(-12);
+  const lo12 = Math.min(...w12.map((k) => k.l)), hi12 = Math.max(...w12.map((k) => k.h)), lo6 = Math.min(...w6.map((k) => k.l));
+  let spike = { rvol: 0, ageBars: null, movedUpAtr: 0, movedDownAtr: 0 };
+  for (let i = done.length - 24; i < done.length; i++) {
+    const prior = done.slice(Math.max(0, i - 20), i), av = avg(prior.map((k) => k.v));
+    const r = av > 0 ? done[i].v / av : 0;
+    if (r > spike.rvol) spike = { rvol: +r.toFixed(2), ageBars: done.length - 1 - i, movedUpAtr: +((price - done[i].o) / a).toFixed(2), movedDownAtr: +((done[i].o - price) / a).toFixed(2) };
+  }
+  const lastLow = last(piv.lows)?.p, lastHigh = last(piv.highs)?.p;
+  return {
+    runUp6: +(price / lo6 - 1).toFixed(4), runUpAtr12: +((price - lo12) / a).toFixed(2), dropAtr12: +((hi12 - price) / a).toFixed(2), runUp12: +(price / lo12 - 1).toFixed(4), drop12: +(1 - price / hi12).toFixed(4),
+    spike, fromSwingLowAtr: lastLow != null ? +((price - lastLow) / a).toFixed(2) : null, fromSwingHighAtr: lastHigh != null ? +((lastHigh - price) / a).toFixed(2) : null, low12: lo12, high12: hi12,
+  };
+}
+
 /** Full structural read of ONE timeframe. Returns null when there is not enough completed history. */
 export function analyze(candles, tf = '') {
   if (!candles || candles.length < 60) return null;
@@ -189,12 +210,16 @@ export function analyze(candles, tf = '') {
   const closes = done.map((k) => k.c), e20s = ema(closes, 20), e50s = ema(closes, 50);
   const e20 = last(e20s), e50 = last(e50s), slope50 = e50s.length > 11 ? (e50 - e50s[e50s.length - 11]) / a : 0;
   const piv = pivots(done);
-  const trend = trendOf(done, price, a, piv, e20, e50, slope50);
+  // A pivot needs 3 bars after it, so a smooth grind to new highs (or a slide to new lows) has no NEW confirmed swing. The running extreme since the last pivot counts as a provisional swing for the trend read.
+  const provHigh = piv.highs.length ? Math.max(...done.slice(piv.highs[piv.highs.length - 1].i + 1).map((k) => k.h)) : null, provLow = piv.lows.length ? Math.min(...done.slice(piv.lows[piv.lows.length - 1].i + 1).map((k) => k.l)) : null;
+  const tolP = 0.3 * a;
+  const trendPiv = { highs: provHigh != null && provHigh > last(piv.highs).p + tolP ? [...piv.highs, { i: done.length - 1, p: provHigh, provisional: true }] : piv.highs, lows: provLow != null && provLow < last(piv.lows).p - tolP ? [...piv.lows, { i: done.length - 1, p: provLow, provisional: true }] : piv.lows };
+  const trend = trendOf(done, price, a, trendPiv, e20, e50, slope50);
   const lv = levelsOf(piv, price, a, done);
   const out = {
     tf, price, atr: a, atrPct: +(a / price).toFixed(4), ema20: e20, ema50: e50, aboveEma20: price > e20, aboveEma50: price > e50,
     trend, levels: lv, box: boxOf(done, price, a), sweep: sweepOf(done, piv, a), candles: candlesOf(done, a, lv, price),
-    flow: pressureOf(done, a, lv, price), volume: volumeOf(done), momentum: momentumOf(done, price, a, e20),
+    flow: pressureOf(done, a, lv, price), volume: volumeOf(done), momentum: momentumOf(done, price, a, e20), recent: recentOf(done, price, a, piv),
     swing: { lastLow: last(piv.lows)?.p ?? null, prevLow: piv.lows.at(-2)?.p ?? null, lastHigh: last(piv.highs)?.p ?? null, prevHigh: piv.highs.at(-2)?.p ?? null },
     lastBar: { o: last(done).o, h: last(done).h, l: last(done).l, c: last(done).c, t: last(done).t },
   };

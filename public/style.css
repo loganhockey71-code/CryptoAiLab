@@ -84,3 +84,12 @@ tbody tr.off td { opacity: .45; }
 table.mini td, table.mini th { padding: 3px 8px; font-size: 12px; } .rep h3 { margin: 12px 0 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; } .rep h3:first-child { margin-top: 0; }
 .rep p { margin: 3px 0; font-size: 12px; } .rep .note { color: var(--amber); }
 .pill.hotc { color: #ff9f43; border-color: rgba(255,159,67,.6); background: rgba(255,159,67,.12); font-weight: 700; } .pill.avoidc { color: var(--red); border-color: rgba(239,83,80,.5); }
+
+/* ---- entry-quality additions */
+.scs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 8px 0 2px; }
+.sc { font-size: 11px; color: var(--muted); } .sc span { text-transform: uppercase; letter-spacing: .05em; font-size: 10px; } .sc b { margin-left: 6px; color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; }
+.sc i { display: block; position: relative; height: 6px; border-radius: 3px; background: var(--line); margin-top: 3px; } .sc u { display: block; height: 100%; border-radius: 3px; background: var(--red); } .sc.ok u { background: var(--green); }
+.sc s { position: absolute; top: -2px; width: 2px; height: 10px; background: var(--amber); text-decoration: none; }
+.whyblock { margin-top: 6px; } .wy { display: grid; grid-template-columns: 120px 1fr; gap: 8px; font-size: 12px; padding: 2px 0; border-top: 1px dashed var(--line); } .wy .k { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: .05em; padding-top: 2px; }
+.funnel { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 11px; } .funnel span { display: flex; flex-direction: column; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; color: var(--muted); } .funnel span b { color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; } .funnel em { color: var(--muted); font-style: normal; }
+.pill.shortc { color: var(--red); border-color: rgba(239,83,80,.6); background: rgba(239,83,80,.12); font-weight: 700; }

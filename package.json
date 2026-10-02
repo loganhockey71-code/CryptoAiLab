@@ -4,8 +4,10 @@
   "description": "Local paper-trading lab",
   "main": "src/server.js",
   "scripts": {
-    "test": "node --test tests/brain.test.mjs",
+    "test": "node --test tests/brain.test.mjs tests/entry.test.mjs",
     "backtest": "node scripts/backtest-brain.mjs 30",
+    "calibrate": "node scripts/backtest-brain.mjs 30 --calibrate",
+    "demo": "node scripts/demo-scenarios.mjs",
     "research": "node scripts/research-long.mjs 240",
     "start": "node src/server.js"
   },

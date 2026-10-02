@@ -94,6 +94,13 @@ export const config = {
     // P(target before stop) and expected value in R after costs. Priors are anchored to BACKTEST base rates (scripts/backtest-brain.mjs: entries meeting the real criteria hit
     // a 2.5R+ target first only ~20-30% of the time and the held-out half was worse), so the score map below is deliberately modest: only the top tail of setups clears it.
     minPUp: 0.30, minEV: 0.15,
+    // Three separate gates (direction / timing / trade geometry): each must pass ON ITS OWN. The overall score is the weakest of the three, so a strong trend cannot hide a poor entry.
+    minDirection: 62, minTiming: 65, minGeometry: 55,
+    chaseWarn: 0.4, chaseVeto: 0.6,          // anti-chasing score (0 fresh .. 1 fully chased): above warn = "late" (timing drops), above veto = WAIT for a pullback / retest
+    detectShorts: true,                      // SHORT setups are detected, scored, journaled and measured (counterfactual) ...
+    allowShortTrades: false,                 // ... but not executed: CLAUDE.md keeps the strategy long-only for v1 (shorts need a perp venue and their own stop engine). Flip only deliberately.
+    newsMinSamples: 15,                      // a news rule gets full weight only after this many measured reactions agree with its expected direction (default weight 0.5)
+    funnel: Object.freeze({ minVol24: 1_000_000, minMcap: 5_000_000, maxDeepPerScan: 150 }),
     exploreRiskFraction: 0.5,    // until 30+ own trades are measured AND their average R is positive, every entry risks only this fraction of the normal 1% (smaller than the cap, never larger)
     exploreMinTrades: 30,
     scoreScale: 55,

@@ -27,6 +27,16 @@ export function radarPriority(c, x = {}) {
   let s = 0;
   const add = (pts, why) => { if (pts > 0.5) { s += pts; if (why) reasons.push(why); } };
   const up1 = Math.max(0, c.chg1h ?? 0), up24 = Math.max(0, c.chg24h ?? 0);
+  // Relative strength vs the market, BTC and ETH: the goal is coins that are STARTING strong, not the ones already up the most.
+  const m = x.mkt;
+  if (m) {
+    const rs1 = (c.chg1h ?? 0) - m.chg1h, rs24 = (c.chg24h ?? 0) - m.chg24h, vsBtc1 = (c.chg1h ?? 0) - (m.btc1h ?? m.chg1h), vsEth1 = (c.chg1h ?? 0) - (m.eth1h ?? m.chg1h);
+    add(clamp01(rs1 / 0.03) * 12, rs1 >= 0.01 ? `+${(rs1 * 100).toFixed(1)}% stronger than the market this hour` : null);
+    add(clamp01(Math.min(vsBtc1, vsEth1) / 0.02) * 6, Math.min(vsBtc1, vsEth1) >= 0.01 ? 'beating both BTC and ETH' : null);
+    if (rs1 > 0.005 && (c.chg24h ?? 0) < 0.12) add(6, 'starting strong, not extended');
+    s -= clamp01(((c.chg24h ?? 0) - 0.2) / 0.3) * 15;                              // already up 20%+ today: late, deprioritised (it can return after a retest)
+    if (rs1 < -0.01 && rs24 < -0.02) add(clamp01(-rs1 / 0.03) * 6, 'weak vs the market (short candidate)');
+  }
   add(clamp01(up1 / 0.05) * 20, up1 >= 0.02 ? `1h +${(up1 * 100).toFixed(1)}%` : null);
   add(clamp01(up24 / 0.15) * 10, up24 >= 0.05 ? `24h +${(up24 * 100).toFixed(1)}%` : null);
   // Volume anomaly: candle-based RVOL when we have it, otherwise how much the 24h volume grew since the last sweep.

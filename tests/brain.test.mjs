@@ -96,10 +96,10 @@ test('brain: a screened-out coin is IGNORE and gets no setup', () => {
   assert.equal(d.setup, null);
 });
 
-test('brain: a closed regime gate blocks entries (hard veto)', () => {
-  const d = decide(ta(up()), { regime: { label: 'risk_off_downtrend', score: -0.6, allowLongs: false, notes: ['BTC down'] } });
+test('brain: a SEVERE regime blocks entries (hard veto)', () => {
+  const d = decide(ta(up()), { regime: { label: 'risk_off_downtrend', score: -0.6, allowLongs: false, severe: true, notes: ['BTC down'] } });
   assert.notEqual(d.action, 'BUY');
-  assert.ok(d.vetoes.some((v) => v.code === 'regime'));
+  assert.ok(d.vetoes.some((v) => v.code === 'severe_regime'));
 });
 
 test('brain: manage() holds while structure is intact and sells when it breaks', () => {
