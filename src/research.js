@@ -118,7 +118,7 @@ Multi-timeframe technicals (each timeframe: trendUp = EMA20>EMA50 and price>EMA5
 Relative volume (RVOL, last completed 15m vs 20-candle avg): ${ctx.rvol}
 Why this coin is being looked at (trending/unusual activity flags): ${JSON.stringify(ctx.activity)}
 Smart money: positions held right now by tracked traders who each have a verified win rate >= 75%: ${JSON.stringify(ctx.smartMoney)}
-Order book (Tier 1, Coinbase level 2, top 50 levels; spread in %, depth = resting USD within 0.5%/1% of mid; truncated=true means depth is a lower bound): ${JSON.stringify(ctx.orderBook)}
+Order book (Tier 1, Coinbase level 2, full aggregated book; spread in %, depthUsd = resting USD within 0.5%/1% of mid, bid and ask side; a wide spread or thin depth means the quoted price is less reliable): ${JSON.stringify(ctx.orderBook)}
 Derivatives (Tier 2, Coinglass): ${JSON.stringify(ctx.derivatives)}
 Macro (Tier 3, FRED): ${JSON.stringify(ctx.macro)}
 Crypto/market legislation (Tier 3, Congress.gov): ${JSON.stringify(ctx.legislation)}

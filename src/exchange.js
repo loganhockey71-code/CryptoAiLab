@@ -43,9 +43,9 @@ export async function fetchTicker(product) {
 }
 
 /**
- * Order-book snapshot from the same public Coinbase endpoint (level 2 = top 50 aggregated levels per side, free, no credentials).
- * Context only (spread and visible depth for the Research Brain and the evidence record); it is not used by any trading rule.
- * `depthUsd` is the resting notional within 0.5% / 1% of the mid price; `truncated` means the 50 levels ended inside that band, so depth is a lower bound.
+ * Order-book snapshot from the same public Coinbase endpoint (level 2 = the FULL aggregated book, every price level; free, no credentials).
+ * Context only (spread and depth for the Research Brain and the evidence record); it is not used by any trading rule.
+ * `depthUsd` is the resting notional within 0.5% / 1% of the mid price. `levels` is how many price levels each side has.
  */
 export async function fetchBook(product) {
   const b = await get(`/products/${product}/book?level=2`);
@@ -56,10 +56,9 @@ export async function fetchBook(product) {
   const band = (pct) => ({ bid: within(bids, pct, -1), ask: within(asks, pct, 1) });
   const d05 = band(0.005), d1 = band(0.01);
   return {
-    bid, ask, mid, spreadPct: (ask - bid) / mid * 100, at: Date.now(), levels: Math.min(bids.length, asks.length),
+    bid, ask, mid, spreadPct: (ask - bid) / mid * 100, at: Date.now(), levels: { bid: bids.length, ask: asks.length },
     depthUsd: { pct05: { bid: Math.round(d05.bid), ask: Math.round(d05.ask) }, pct1: { bid: Math.round(d1.bid), ask: Math.round(d1.ask) } },
     imbalance1pct: d1.bid + d1.ask > 0 ? +((d1.bid - d1.ask) / (d1.bid + d1.ask)).toFixed(2) : 0,    // +1 = all resting size is on the bid side
-    truncated: Math.abs(bids[bids.length - 1][0] / mid - 1) < 0.01 || Math.abs(asks[asks.length - 1][0] / mid - 1) < 0.01,
   };
 }
 
