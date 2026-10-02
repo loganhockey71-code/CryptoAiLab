@@ -1,4 +1,6 @@
 // THE RESEARCH BRAIN: asynchronous LLM that outputs structured JSON only. It never places orders.
+import fs from 'node:fs';
+import path from 'node:path';
 import { config, warn } from './config.js';
 
 const { gemini, openrouter, nvidia, custom, customUrl, groq, ollama, kilo, aiGateway } = config.keys;
@@ -177,6 +179,22 @@ const isDown = (name) => {
   if (h.downUntil) { h.downUntil = 0; warn(`AI provider ${name} is available again (was down: ${h.kind}); the next call will probe it`); }
   return false;
 };
+// The down/up state survives a restart (logs/ai-provider-state.json), so a restart does not forget which models are out of quota and re-spend calls finding out again.
+const STATE_FILE = path.join(config.root, 'logs', 'ai-provider-state.json');
+function saveHealth() {
+  try {
+    const out = {};
+    for (const [n, h] of health) if (h.downUntil > Date.now() || h.wasted || h.outages) out[n] = h;
+    fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+    fs.writeFileSync(STATE_FILE, JSON.stringify(out));
+  } catch { /* best effort: never let bookkeeping break the Research Brain */ }
+}
+try {
+  const saved = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); let live = 0;
+  for (const [n, h] of Object.entries(saved)) { Object.assign(hs(n), h); if (h.downUntil > Date.now()) live++; }
+  if (live) warn(`AI provider state restored: ${live} model(s) still out of quota / rejected, skipped until their reset`);
+} catch { /* first run */ }
+
 const nextUtcMidnight = () => { const d = new Date(); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1); };
 
 /** Ms a provider says to wait: Gemini RetryInfo / "Please retry in 8h24m7s", OpenRouter X-RateLimit-Reset (epoch ms), or the Retry-After header. null if unknown. */
@@ -220,6 +238,7 @@ function markDown(name, c, e) {
   if (c.kind === 'quota' && ['openrouter', 'kilo', 'vercel', 'ollama'].includes(group)) for (const [n] of chain()) if (n.startsWith(`${group}:`) && n !== name) Object.assign(hs(n), { downUntil: c.until, kind: 'quota', reason: h.reason });   // account-wide cap: every model behind that key is out
   const mins = Math.round((c.until - Date.now()) / 60_000);
   warn(`AI provider ${name} unavailable: ${c.kind} limit (HTTP ${e.status}), will not be retried until ${new Date(c.until).toISOString()} (${mins >= 90 ? (mins / 60).toFixed(1) + 'h' : mins + 'm'}); wasted attempts so far: ${h.wasted}, calls avoided: ${h.avoided}`);
+  saveHealth();
   llmStats.lastError = `${name}: ${c.kind} limit until ${new Date(c.until).toISOString().slice(0, 16)}Z`; llmStats.lastErrorAt = Date.now();
 }
 
