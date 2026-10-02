@@ -1,9 +1,9 @@
 // THE RESEARCH BRAIN: asynchronous LLM that outputs structured JSON only. It never places orders.
 import { config, warn } from './config.js';
 
-const { gemini, openrouter } = config.keys;
+const { gemini, openrouter, nvidia } = config.keys;
 /** A key is configured. This says nothing about whether the providers still have quota: see llmUsable(). */
-export const llmAvailable = () => !!(gemini || openrouter);
+export const llmAvailable = () => !!(nvidia || gemini || openrouter);
 
 /** HTTP error from a provider, keeping the status, body and Retry-After so the failure can be classified (message format unchanged). */
 class ApiError extends Error {
@@ -23,6 +23,21 @@ async function callGemini(prompt, model) {
   if (!res.ok) throw new ApiError('gemini', res.status, await res.text(), res.headers.get('retry-after'));
   const j = await res.json();
   return j.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') ?? '';
+}
+
+/** NVIDIA NIM (OpenAI-compatible). A reasoning model: the answer is in `content`; any chain-of-thought arrives as `reasoning_content` or inside <think> tags and is dropped. */
+async function callNvidia(prompt) {
+  const res = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${nvidia}`, accept: 'application/json' },
+    body: JSON.stringify({ model: config.models.nvidia, messages: [{ role: 'user', content: prompt }], temperature: 0.2, max_tokens: 6000, stream: false }),
+    signal: AbortSignal.timeout(90_000),
+  });
+  if (!res.ok) throw new ApiError('nvidia', res.status, await res.text(), res.headers.get('retry-after'));
+  const j = await res.json();
+  const m = j.choices?.[0]?.message ?? {};
+  const answer = String(m.content ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  return answer || String(m.reasoning_content ?? m.reasoning ?? '');       // last resort: some deployments put the whole reply in the reasoning field
 }
 
 async function callOpenRouter(prompt) {
@@ -73,8 +88,9 @@ const isTransient = (e) => /-> (408|425|429|500|502|503|504)/.test(e.message) ||
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const L = config.llm;
-/** The model chain, in order: every Gemini model (each has its OWN daily quota), then OpenRouter. */
+/** The model chain, in order: NVIDIA NIM (primary), every Gemini model (each has its OWN daily quota), then OpenRouter. */
 const chain = () => [
+  ...(nvidia ? [['nvidia', callNvidia]] : []),
   ...(gemini ? config.models.gemini.map((m) => [`gemini:${m}`, (p) => callGemini(p, m)]) : []),
   ...(openrouter ? [['openrouter', callOpenRouter]] : []),
 ];
@@ -115,6 +131,7 @@ function resetMsFromError(e) {
 export function classifyUnrecoverable(e) {
   const now = Date.now(), text = `${e.body ?? ''} ${e.message}`;
   if (e.status === 401 || e.status === 403) return { kind: 'auth', until: now + L.authDownMs };
+  if (e.status === 402) return { kind: 'quota', until: now + L.quotaFallbackMs };   // payment required / credits exhausted: stays out until re-probed
   if (e.status !== 429) return null;
   const waitMs = resetMsFromError(e);
   const daily = /per.?day|daily|free-models-per-day/i.test(text) || (waitMs != null && waitMs > 15 * 60_000);
@@ -143,36 +160,38 @@ export const llmProviders = () => chain().map(([name]) => {
 });
 
 /**
- * Call the model chain until one returns valid JSON. Models that are down (quota / rate limit / bad key) are skipped without a request; a busy, slow or garbled
- * model never ends the attempt: the next model is tried (one short retry for transient errors, unparseable output retried with a stricter instruction), and the
- * chain is run a second time only while at least one model is still usable. Returns null when nothing usable answered; the caller degrades gracefully.
+ * Call the model chain until one returns valid JSON. Models that are down (quota / rate limit / bad key) are skipped without a request, and a call that fails
+ * that way does NOT use the attempt budget (it cannot be retried; it takes that model out until its reset). Everything else (timeout, 5xx, unparseable output)
+ * is TRANSIENT and uses `budget.left`: one signal makes at most L.maxAttemptsPerSignal such calls in total (the first call + 1 retry), across all models and across
+ * generateSignal's corrective re-ask. The retry goes to the next usable model, or the same one with a stricter instruction if it is the only one left.
+ * Returns null when nothing usable answered; the caller degrades gracefully and the coin is looked at again on a later scan.
  */
-export async function llmJson(prompt) {
+export async function llmJson(prompt, budget = { left: L.maxAttemptsPerSignal }) {
   const providers = chain();
   const strict = `${prompt}
 
 IMPORTANT: respond with ONE valid JSON object only: no markdown, no commentary, no trailing commas.`;
-  for (let pass = 0; pass < 2; pass++) {
-    if (!providers.some(([name]) => !isDown(name))) return null;      // everything is out of quota: fail fast, spend nothing
-    if (pass > 0) await sleepMs(5000);
+  let stricter = false;                                                 // after an unparseable answer, ask again more firmly
+  for (let round = 0; round < 2; round++) {                             // round 2 only happens for the "single model left" retry
     for (const [name, fn] of providers) {
-      if (isDown(name)) { hs(name).avoided++; continue; }
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const out = parseJson(await fn(attempt === 0 ? prompt : strict));
-          if (out) return { json: out, provider: name };
-          noteError('unparseable', `${name}: unparseable JSON`);
-          warn(`${name} returned unparseable JSON${attempt === 0 ? ', retrying with a stricter instruction' : ''}`);
-        } catch (e) {
-          const c = classifyUnrecoverable(e);
-          if (c) { markDown(name, c, e); break; }                     // cannot succeed until the reset: no retry, on to the next model
-          if (isTransient(e)) { noteError('transient', `${name}: ${e.message.replace(/\s+/g, ' ').slice(0, 100)}`); warn(`${name} busy/slow (${e.message.replace(/\s+/g, ' ').slice(0, 80)})${attempt === 0 ? ', retrying once' : ', trying the next model'}`); if (attempt === 0) await sleepMs(1500); continue; }
-          noteError('hard', `${name}: ${e.message.replace(/\s+/g, ' ').slice(0, 100)}`);
-          warn(`LLM call failed (${name}):`, e.message.replace(/\s+/g, ' ').slice(0, 160));
-          break;                                                      // a hard error (bad request) will not fix itself on retry
-        }
+      if (isDown(name)) { if (round === 0) hs(name).avoided++; continue; }
+      if (budget.left <= 0) return null;
+      budget.left--;
+      try {
+        const out = parseJson(await fn(stricter ? strict : prompt));
+        if (out) return { json: out, provider: name };
+        noteError('unparseable', `${name}: unparseable JSON`);
+        warn(`${name} returned unparseable JSON (${budget.left} retr${budget.left === 1 ? 'y' : 'ies'} left for this signal)`);
+        stricter = true;
+      } catch (e) {
+        const c = classifyUnrecoverable(e);
+        if (c) { budget.left++; markDown(name, c, e); continue; }          // cannot succeed until the reset: refund the attempt, try the next model
+        if (isTransient(e)) { noteError('transient', `${name}: ${e.message.replace(/\s+/g, ' ').slice(0, 100)}`); warn(`${name} busy/slow (${e.message.replace(/\s+/g, ' ').slice(0, 80)}) (${budget.left} retr${budget.left === 1 ? 'y' : 'ies'} left for this signal)`); continue; }
+        noteError('hard', `${name}: ${e.message.replace(/\s+/g, ' ').slice(0, 100)}`);
+        warn(`LLM call failed (${name}):`, e.message.replace(/\s+/g, ' ').slice(0, 160));
       }
     }
+    if (budget.left <= 0 || !providers.some(([name]) => !isDown(name))) return null;
   }
   return null;
 }
@@ -224,9 +243,10 @@ Return JSON with exactly these keys:
   // A formatting slip must not cost a valid setup: validate (leniently), and if the answer is unusable ask once more, saying what was wrong.
   if (!llmUsable()) { llmStats.skippedUnavailable++; return null; }   // nothing can answer: do not count it as a failed signal
   let problem = null;
+  const budget = { left: L.maxAttemptsPerSignal };                 // ONE budget for this signal, shared with the corrective re-ask below
   llmStats.signals++;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const out = await llmJson(attempt === 0 ? prompt : `${prompt}\n\nYour previous answer was rejected: ${problem}. Return the corrected JSON object only.`);
+    const out = await llmJson(attempt === 0 ? prompt : `${prompt}\n\nYour previous answer was rejected: ${problem}. Return the corrected JSON object only.`, budget);
     if (!out) { llmStats.noSignal++; return null; }              // every model failed or timed out: the caller retries this coin later instead of rejecting it
     const v = validateSignal(out.json, ctx.price);
     if (v.ok) { llmStats.signalsOk++; llmStats.lastOkAt = Date.now(); llmStats.lastOkProvider = out.provider; return { provider: out.provider, ...v.signal }; }

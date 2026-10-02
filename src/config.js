@@ -26,6 +26,7 @@ export const config = {
     supabaseKey: env('SUPABASE_SERVICE_ROLE_KEY'),
     gemini: env('GEMINI_API_KEY'),
     openrouter: env('OPENROUTER_API_KEY'),
+    nvidia: env('NVIDIA_API_KEY'),
     coingecko: env('COINGECKO_API_KEY'),
     coinmarketcap: env('COINMARKETCAP_API_KEY'),
     coinglass: env('COINGLASS_API_KEY'),
@@ -40,6 +41,8 @@ export const config = {
     // tried in order; one congested or retired model must not take the Research Brain offline
     gemini: ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-flash-latest'],
     openrouter: env('OPENROUTER_MODEL') || 'google/gemini-3.5-flash',
+    // NVIDIA NIM (OpenAI-compatible, https://integrate.api.nvidia.com): the PRIMARY Research Brain model. Gemini and OpenRouter stay as fallbacks.
+    nvidia: env('NVIDIA_MODEL') || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
   },
   // Deterministic risk constants. The self-learning system must never write to these.
   risk: Object.freeze({
@@ -121,7 +124,8 @@ export const config = {
   }),
   // AI provider handling. An error that cannot succeed until a reset is not retried: that model is skipped until then (the values below are only fallbacks when the provider gives no reset time).
   // pressureMaxSignals: once any model has hit a DAILY quota, only this many of the best candidates are sent to the AI per scan, so what is left is reserved for them.
-  llm: Object.freeze({ authDownMs: 30 * 60_000, quotaFallbackMs: 2 * 3600_000, rateFallbackMs: 60_000, maxDownMs: 26 * 3600_000, pressureMaxSignals: 5 }),
+  // maxAttemptsPerSignal: HTTP calls one signal may make for TRANSIENT trouble (timeouts, 5xx, unparseable output) = the first call + 1 retry in total, across every model.
+  llm: Object.freeze({ maxAttemptsPerSignal: 2, authDownMs: 30 * 60_000, quotaFallbackMs: 2 * 3600_000, rateFallbackMs: 60_000, maxDownMs: 26 * 3600_000, pressureMaxSignals: 5 }),
   // Trending / unusually-active detection. It only decides what gets researched FIRST; it never lowers a requirement.
   movers: Object.freeze({ chg1h: 0.04, chg4h: 0.08, chg24h: 0.15, rvol: 2.5, maxMoversPerScan: 3, fastTrigger1h: 0.08, fastCheckMs: 60_000, fastCooldownMs: 15 * 60_000 }),
   scanIntervalMs: 5 * 60_000,
