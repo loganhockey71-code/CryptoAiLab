@@ -90,7 +90,7 @@ setInterval(() => {
     const mid = (s.bestBid + s.bestAsk) / 2, ageS = s.lastTrade ? (now - s.lastTrade.t) / 1000 : null;
     stats.samples++;
     emit({ k: 'sample', at: now, p, tradeAgeS: ageS == null ? null : +ageS.toFixed(0), lastPx: s.lastTrade?.px ?? null, bid: s.bestBid, ask: s.bestAsk, spreadPct: +((s.bestAsk - s.bestBid) / mid * 100).toFixed(4), unchangedS: +((now - s.quoteAt) / 1000).toFixed(1), feedLagS: +((now - lastMsg) / 1000).toFixed(1), depth: depthOf(s), levels: [s.bids.size, s.asks.size] });
-    if (ageS != null && ageS >= 30) setTimeout(() => { const x = S[p]; if (x?.bestBid) emit({ k: 'hold', at: Date.now(), p, base: { bid: s.bestBid, ask: s.bestAsk }, bid: x.bestBid, ask: x.bestAsk, afterS: 10 }); }, 10_000);
+    if (ageS != null && ageS >= 30) { const base = { bid: s.bestBid, ask: s.bestAsk }; setTimeout(() => { const x = S[p]; if (x?.bestBid) emit({ k: 'hold', at: Date.now(), p, base, bid: x.bestBid, ask: x.bestAsk, afterS: 10 }); }, 10_000); }   // base is captured NOW (a closure over the live book would read the same quote 10s later)
   }
 }, 60_000);
 
