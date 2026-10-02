@@ -2,7 +2,13 @@
 import { config, warn } from './config.js';
 
 const { gemini, openrouter } = config.keys;
+/** A key is configured. This says nothing about whether the providers still have quota: see llmUsable(). */
 export const llmAvailable = () => !!(gemini || openrouter);
+
+/** HTTP error from a provider, keeping the status, body and Retry-After so the failure can be classified (message format unchanged). */
+class ApiError extends Error {
+  constructor(provider, status, body, retryAfter) { super(`${provider} -> ${status} ${body.slice(0, 120)}`); this.status = status; this.body = body; this.retryAfter = retryAfter; }
+}
 
 async function callGemini(prompt, model) {
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
@@ -14,7 +20,7 @@ async function callGemini(prompt, model) {
     }),
     signal: AbortSignal.timeout(60_000),
   });
-  if (!res.ok) throw new Error(`gemini -> ${res.status} ${(await res.text()).slice(0, 120)}`);
+  if (!res.ok) throw new ApiError('gemini', res.status, await res.text(), res.headers.get('retry-after'));
   const j = await res.json();
   return j.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') ?? '';
 }
@@ -32,7 +38,7 @@ async function callOpenRouter(prompt) {
     }),
     signal: AbortSignal.timeout(60_000),
   });
-  if (!res.ok) throw new Error(`openrouter -> ${res.status} ${(await res.text()).slice(0, 120)}`);
+  if (!res.ok) throw new ApiError('openrouter', res.status, await res.text(), res.headers.get('retry-after'));
   const j = await res.json();
   return j.choices?.[0]?.message?.content ?? '';
 }
@@ -60,26 +66,97 @@ export function parseJson(text) {
 }
 
 /** Research Brain health counters since startup (for the dashboard): why signals are missing, not just that they are. */
-export const llmStats = { since: Date.now(), signals: 0, signalsOk: 0, noSignal: 0, invalid: 0, unparseable: 0, transient: 0, hard: 0, lastError: null, lastErrorAt: null, lastOkAt: null, lastOkProvider: null };
+export const llmStats = { since: Date.now(), skippedUnavailable: 0, signals: 0, signalsOk: 0, noSignal: 0, invalid: 0, unparseable: 0, transient: 0, hard: 0, lastError: null, lastErrorAt: null, lastOkAt: null, lastOkProvider: null };
 const noteError = (kind, text) => { llmStats[kind]++; llmStats.lastError = text; llmStats.lastErrorAt = Date.now(); };
 
 const isTransient = (e) => /-> (408|425|429|500|502|503|504)/.test(e.message) || e.name === 'TimeoutError' || e.name === 'AbortError' || /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket|network/i.test(e.message);
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const L = config.llm;
+/** The model chain, in order: every Gemini model (each has its OWN daily quota), then OpenRouter. */
+const chain = () => [
+  ...(gemini ? config.models.gemini.map((m) => [`gemini:${m}`, (p) => callGemini(p, m)]) : []),
+  ...(openrouter ? [['openrouter', callOpenRouter]] : []),
+];
+
+// ---- Provider health. An error that cannot succeed until a reset (daily quota, per-minute limit, bad key) takes THAT model out of the chain until the reset time
+// instead of being retried; every other model keeps working. `wasted` = calls that failed this way, `avoided` = calls we did not make because the model was down.
+const health = new Map();          // name -> { downUntil, kind, reason, wasted, avoided, outages }
+const hs = (name) => { let h = health.get(name); if (!h) health.set(name, h = { downUntil: 0, kind: null, reason: null, wasted: 0, avoided: 0, outages: 0 }); return h; };
+const isDown = (name) => {
+  const h = hs(name);
+  if (h.downUntil > Date.now()) return true;
+  if (h.downUntil) { h.downUntil = 0; warn(`AI provider ${name} is available again (was down: ${h.kind}); the next call will probe it`); }
+  return false;
+};
+const nextUtcMidnight = () => { const d = new Date(); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1); };
+
+/** Ms a provider says to wait: Gemini RetryInfo / "Please retry in 8h24m7s", OpenRouter X-RateLimit-Reset (epoch ms), or the Retry-After header. null if unknown. */
+function resetMsFromError(e) {
+  const body = e.body ?? '';
+  try {
+    const j = JSON.parse(body);
+    const info = (j.error?.details ?? []).find((d) => d.retryDelay);
+    if (info) return parseFloat(info.retryDelay) * 1000;
+    const reset = Number(j.error?.metadata?.headers?.['X-RateLimit-Reset']);
+    if (reset > Date.now()) return reset - Date.now();
+  } catch { /* not JSON */ }
+  const m = body.match(/retry in\s+(?:(\d+(?:\.\d+)?)h)?\s*(?:(\d+(?:\.\d+)?)m(?!s))?\s*(?:(\d+(?:\.\d+)?)s)?/i);
+  if (m && (m[1] || m[2] || m[3])) return ((+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0)) * 1000;
+  const ra = Number(e.retryAfter);
+  return ra > 0 ? ra * 1000 : null;
+}
+
 /**
- * Call the model chain until one returns valid JSON. A busy/slow/garbled model never ends the attempt: every Gemini model is tried (with one short retry for
- * transient errors), then OpenRouter (retrying unparseable output with a stricter instruction), and the whole chain is run twice with a pause in between.
+ * Is this error one that CANNOT succeed on retry until some reset? Returns { kind, until } or null (retryable / transient).
+ *  quota = a daily (or other long) limit: down until the reset the provider reports, else the next 00:00 UTC (OpenRouter) or a re-probe delay (Gemini).
+ *  rate  = a per-minute limit: down for exactly the delay it reports.   auth = bad / forbidden key: down for a long cooldown.
+ */
+export function classifyUnrecoverable(e) {
+  const now = Date.now(), text = `${e.body ?? ''} ${e.message}`;
+  if (e.status === 401 || e.status === 403) return { kind: 'auth', until: now + L.authDownMs };
+  if (e.status !== 429) return null;
+  const waitMs = resetMsFromError(e);
+  const daily = /per.?day|daily|free-models-per-day/i.test(text) || (waitMs != null && waitMs > 15 * 60_000);
+  if (daily) return { kind: 'quota', until: now + Math.min(L.maxDownMs, waitMs ?? (/openrouter/i.test(e.message) ? nextUtcMidnight() - now : L.quotaFallbackMs)) };
+  return { kind: 'rate', until: now + Math.min(15 * 60_000, (waitMs ?? L.rateFallbackMs) + 1000) };
+}
+
+function markDown(name, c, e) {
+  const h = hs(name);
+  h.downUntil = c.until; h.kind = c.kind; h.reason = e.message.replace(/\s+/g, ' ').slice(0, 140); h.wasted++; h.outages++;
+  const mins = Math.round((c.until - Date.now()) / 60_000);
+  warn(`AI provider ${name} unavailable: ${c.kind} limit (HTTP ${e.status}), will not be retried until ${new Date(c.until).toISOString()} (${mins >= 90 ? (mins / 60).toFixed(1) + 'h' : mins + 'm'}); wasted attempts so far: ${h.wasted}, calls avoided: ${h.avoided}`);
+  llmStats.lastError = `${name}: ${c.kind} limit until ${new Date(c.until).toISOString().slice(0, 16)}Z`; llmStats.lastErrorAt = Date.now();
+}
+
+/** At least one configured model can currently be called. When false the Research Brain is paused (it never trades, so the strategy simply stays in cash). */
+export const llmUsable = () => chain().some(([name]) => !isDown(name));
+/** When the first model comes back (ms epoch), or null if something is already usable or nothing is configured. */
+export const llmResumeAt = () => (llmUsable() ? null : Math.min(...chain().map(([name]) => hs(name).downUntil)));
+/** True once any model has hit a daily QUOTA (the others are probably close behind): the engine then spends what is left on the best candidates only. */
+export const llmPressure = () => chain().some(([name]) => { const h = hs(name); return h.kind === 'quota' && h.downUntil > Date.now(); });
+/** Per-provider status for the dashboard and logs. */
+export const llmProviders = () => chain().map(([name]) => {
+  const h = hs(name), down = h.downUntil > Date.now();
+  return { name, state: down ? 'down' : 'ok', kind: down ? h.kind : null, until: down ? h.downUntil : null, reason: h.reason, wastedAttempts: h.wasted, avoidedCalls: h.avoided, outages: h.outages };
+});
+
+/**
+ * Call the model chain until one returns valid JSON. Models that are down (quota / rate limit / bad key) are skipped without a request; a busy, slow or garbled
+ * model never ends the attempt: the next model is tried (one short retry for transient errors, unparseable output retried with a stricter instruction), and the
+ * chain is run a second time only while at least one model is still usable. Returns null when nothing usable answered; the caller degrades gracefully.
  */
 export async function llmJson(prompt) {
-  const providers = [];
-  if (gemini) for (const m of config.models.gemini) providers.push([`gemini:${m}`, (p) => callGemini(p, m)]);
-  if (openrouter) providers.push(['openrouter', callOpenRouter]);
+  const providers = chain();
   const strict = `${prompt}
 
 IMPORTANT: respond with ONE valid JSON object only: no markdown, no commentary, no trailing commas.`;
   for (let pass = 0; pass < 2; pass++) {
+    if (!providers.some(([name]) => !isDown(name))) return null;      // everything is out of quota: fail fast, spend nothing
     if (pass > 0) await sleepMs(5000);
     for (const [name, fn] of providers) {
+      if (isDown(name)) { hs(name).avoided++; continue; }
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           const out = parseJson(await fn(attempt === 0 ? prompt : strict));
@@ -87,10 +164,12 @@ IMPORTANT: respond with ONE valid JSON object only: no markdown, no commentary, 
           noteError('unparseable', `${name}: unparseable JSON`);
           warn(`${name} returned unparseable JSON${attempt === 0 ? ', retrying with a stricter instruction' : ''}`);
         } catch (e) {
+          const c = classifyUnrecoverable(e);
+          if (c) { markDown(name, c, e); break; }                     // cannot succeed until the reset: no retry, on to the next model
           if (isTransient(e)) { noteError('transient', `${name}: ${e.message.replace(/\s+/g, ' ').slice(0, 100)}`); warn(`${name} busy/slow (${e.message.replace(/\s+/g, ' ').slice(0, 80)})${attempt === 0 ? ', retrying once' : ', trying the next model'}`); if (attempt === 0) await sleepMs(1500); continue; }
           noteError('hard', `${name}: ${e.message.replace(/\s+/g, ' ').slice(0, 100)}`);
           warn(`LLM call failed (${name}):`, e.message.replace(/\s+/g, ' ').slice(0, 160));
-          break;                                                  // a hard error (bad key, bad request) will not fix itself on retry
+          break;                                                      // a hard error (bad request) will not fix itself on retry
         }
       }
     }
@@ -143,6 +222,7 @@ Return JSON with exactly these keys:
 {"direction":"bullish"|"neutral"|"bearish","confidence":0-100,"target_price":number,"stop_price":number,"timeframe_hours":number,"supporting_sources":[...],"conflicting_sources":[...],"evidence_summary":"2-4 sentences, probabilistic wording","key_risks":"1-2 sentences"}`;
 
   // A formatting slip must not cost a valid setup: validate (leniently), and if the answer is unusable ask once more, saying what was wrong.
+  if (!llmUsable()) { llmStats.skippedUnavailable++; return null; }   // nothing can answer: do not count it as a failed signal
   let problem = null;
   llmStats.signals++;
   for (let attempt = 0; attempt < 2; attempt++) {

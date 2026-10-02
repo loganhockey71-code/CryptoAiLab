@@ -119,6 +119,9 @@ export const config = {
     minMcapUsd: 5_000_000, maxVolMcap: 3, washCapCeiling: 500_000_000,   // manipulation screens
     thinSpikePct: 0.20, thinSpikeVol: 3_000_000,
   }),
+  // AI provider handling. An error that cannot succeed until a reset is not retried: that model is skipped until then (the values below are only fallbacks when the provider gives no reset time).
+  // pressureMaxSignals: once any model has hit a DAILY quota, only this many of the best candidates are sent to the AI per scan, so what is left is reserved for them.
+  llm: Object.freeze({ authDownMs: 30 * 60_000, quotaFallbackMs: 2 * 3600_000, rateFallbackMs: 60_000, maxDownMs: 26 * 3600_000, pressureMaxSignals: 5 }),
   // Trending / unusually-active detection. It only decides what gets researched FIRST; it never lowers a requirement.
   movers: Object.freeze({ chg1h: 0.04, chg4h: 0.08, chg24h: 0.15, rvol: 2.5, maxMoversPerScan: 3, fastTrigger1h: 0.08, fastCheckMs: 60_000, fastCooldownMs: 15 * 60_000 }),
   scanIntervalMs: 5 * 60_000,

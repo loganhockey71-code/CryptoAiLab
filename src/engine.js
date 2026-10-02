@@ -9,7 +9,7 @@ import { refreshUniverse, restoreCooldowns, universe, cgTrending, radar as radar
 import * as radarLib from './radar.js';
 import { snapshot, aggregate, rvol as calcRvol, atr, ema, rsi, candlePattern } from './indicators.js';
 import * as src from './sources.js';
-import { generateSignal, reflectOnTrade, llmAvailable, llmStats } from './research.js';
+import { generateSignal, reflectOnTrade, llmAvailable, llmUsable, llmResumeAt, llmPressure, llmProviders, llmStats } from './research.js';
 import * as riskLib from './risk.js';
 import { guard } from './guardrails.js';
 
@@ -277,6 +277,18 @@ function rejectFor(cs) {
   return null;
 }
 
+/**
+ * Technical and RVOL each need >= minComponent on their own (riskLib.requirements). Both are fully known BEFORE the AI is asked, so a coin that is already below
+ * either floor can never trade and must not spend an AI call. Same rounding as the confluence record, so this rejects exactly what requirements() would reject.
+ */
+function componentFloor(cs) {
+  const p = cs.partialScore, r1 = (x) => Math.round(x * 10) / 10;
+  if (!p) return null;
+  if (r1(p.technical) < R.minComponent) return `technical ${r1(p.technical)}/25 < ${R.minComponent}`;
+  if (r1(p.rvol) < R.minComponent) return `volume (RVOL) ${r1(p.rvol)}/25 < ${R.minComponent}`;
+  return null;
+}
+
 const rowActivity = (cs) => { const a = activity(cs); return { chg1h: a.h1, chg24h: a.h24, hot: a.hot, hotReasons: a.reasons, dump: a.dump }; };
 
 /* ------------------------------------------------------------ evaluation */
@@ -299,6 +311,8 @@ async function evaluateCoinInner(cs, trigger, ctxSources, lessons, stats) {
   if (!cs.partialScore || cs.partialScore.total < 30) { await recordSkipped(cs, `technical + volume too weak (${cs.partialScore ? cs.partialScore.total.toFixed(1) : 'n/a'}/50): confluence cannot reach ${R.minConfluence}`, { evidence: { trigger } }); return; }
 
   // Smart money = derivatives positioning (funding / open interest) + what our >=75%-win-rate tracked traders hold in this coin right now.
+  const floorFail = componentFloor(cs);
+  if (floorFail) { await recordSkipped(cs, `requirement not met before the AI was asked (it could not pass anyway): ${floorFail}`, { evidence: { trigger } }); return; }
   const sm = smartMoneyProvider ? smartMoneyProvider(cs.symbol) : null;
   const smB = riskLib.smartMoneyBonus(sm);
   const deriv = await src.derivatives(cs.symbol); noteSource(deriv); cs.deriv = deriv;
@@ -332,7 +346,11 @@ async function evaluateCoinInner(cs, trigger, ctxSources, lessons, stats) {
     smartMoney: sm ? { trackedTradersLong: sm.longs, trackedTradersShort: sm.shorts, detail: sm.traders.map((t) => ({ side: t.side, winRate: +t.winRate.toFixed(2) })) } : 'no tracked trader currently holds this coin',
     provenance,
   }, lessons.map((l) => ({ outcome: l.outcome, symbol: l.symbol, lesson: l.lesson })));
-  if (!sig) { await recordSkipped(cs, `Research Brain unavailable or returned no usable signal after retries (last error: ${llmStats.lastError ?? 'none recorded'}): the setup was NOT judged, will be retried`, { evidence: { trigger } }); return 'ai_failed'; }
+  if (!sig) {
+    const resume = llmResumeAt();
+    await recordSkipped(cs, resume ? `Research Brain paused: every AI provider is out of quota until ${new Date(resume).toISOString().slice(0, 16)}Z: the setup was NOT judged, will be retried after that` : `Research Brain returned no usable signal after retries (last error: ${llmStats.lastError ?? 'none recorded'}): the setup was NOT judged, will be retried`, { evidence: { trigger } });
+    return 'ai_failed';
+  }
   cs.lastLlmAt = Date.now();
 
   const mult = historyMultiplier(cs.symbol);
@@ -375,6 +393,11 @@ async function evaluateCandidates(ctxSources) {
   if (!gate.allowed) { logDecision('skipped', '*', `trading blocked: ${gate.reason}`); return; }
   if (open >= R.maxOpenPositions) { logDecision('skipped', '*', `${open} positions/pending signals already (max ${R.maxOpenPositions})`); return; }
   if (!llmAvailable()) { logDecision('info', '*', 'No LLM key configured (GEMINI_API_KEY / OPENROUTER_API_KEY): Research Brain offline, staying in cash'); return; }
+  if (!llmUsable()) {
+    state.researchQueue = [];
+    logDecision('info', '*', `Research Brain paused: every AI provider is out of quota/limited until ${new Date(llmResumeAt()).toISOString().slice(0, 16)}Z. No AI calls this scan; strategy entries wait (copy trading and open-position management are unaffected)`);
+    return;
+  }
 
   const now = Date.now();
   // Stage 2 of the funnel. The whole universe has been scanned cheaply; only coins that pass the screens AND still could reach 80/100 are candidates,
@@ -385,19 +408,23 @@ async function evaluateCandidates(ctxSources) {
     .filter((cs) => !(cs.coin.cooldownUntil && cs.coin.cooldownUntil > now))
     .filter((cs) => now - (cs.lastLlmAt ?? 0) > 20 * 60_000)
     .filter((cs) => ![...state.positions.values()].some((p) => p.symbol === cs.symbol) && ![...state.pending.values()].some((p) => p.symbol === cs.symbol))
-    .filter((cs) => { const r = rejectFor(cs); if (r) rejected[r.code] = (rejected[r.code] ?? 0) + 1; return !r; });
+    .filter((cs) => { const r = rejectFor(cs); if (r) rejected[r.code] = (rejected[r.code] ?? 0) + 1; return !r; })
+    .filter((cs) => { if (!componentFloor(cs)) return true; rejected.component_floor = (rejected.component_floor ?? 0) + 1; return false; });
   const hotAll = [...state.coins.values()].filter((cs) => cs.coin?.tradable && cs.health.ok && activity(cs).hot);
   const ranked = candidates.map((cs) => ({ cs, a: activity(cs), p: priorityOf(cs) })).sort((x, y) => y.p.score - x.p.score);
   // Deep-research slots go to candidates whose price is verifiably fresh (same 30s evaluation rule evaluateCoin enforces): a thinly traded coin whose last trade
   // is minutes old would only burn a slot and be dropped at the first check, so the next-best qualified candidate gets that slot instead. Nothing is loosened.
   const lineup = [], stale = [];
+  const aiCap = llmPressure() ? Math.min(Z.researchMax, config.llm.pressureMaxSignals) : Z.researchMax;   // a model already hit its DAILY quota: keep what is left for the best few
   for (const { cs, a, p } of ranked) {
-    if (lineup.length >= Z.researchMax || stale.length >= 3 * Z.researchMax) break;
+    if (lineup.length >= aiCap || stale.length >= 3 * Z.researchMax) break;
     const fp = await feed.freshPrice(cs.coin.product, R.evalStaleMs);
     if (fp.price == null) { stale.push(cs.symbol); continue; }
     lineup.push({ cs, trigger: { kind: a.hot && !a.dump ? 'mover' : 'scan', reasons: p.reasons.length ? p.reasons : [`technical + volume ${cs.partialScore.total.toFixed(0)}/50`], priority: +p.score.toFixed(0), h1: a.h1, h24: a.h24, rvol: cs.rvol } });
   }
   if (stale.length) rejected.stale_price = stale.length;
+  // Best pre-AI quality first (technical + RVOL, then radar priority): if the quota or the 3 position slots run out mid-scan, the strongest candidates were already asked.
+  lineup.sort((x, y) => y.cs.partialScore.total - x.cs.partialScore.total || y.trigger.priority - x.trigger.priority);
   state.rejected = rejected;
   state.researchQueue = lineup.map(({ cs, trigger }) => ({ symbol: cs.symbol, priority: trigger.priority, reasons: trigger.reasons }));
   const rejSummary = Object.entries(rejected).map(([k, n]) => `${n} ${k.replace('_', ' ')}`).join(', ');
@@ -408,10 +435,11 @@ async function evaluateCandidates(ctxSources) {
   const aiFailed = [];
   for (const { cs, trigger } of lineup) {
     if (state.positions.size + state.pending.size >= R.maxOpenPositions) break;
+    if (!llmUsable()) { logDecision('info', '*', `Research Brain went out of quota mid-scan: ${lineup.length - lineup.findIndex((x) => x.cs === cs)} queued candidate(s) not asked, no further AI calls`); break; }
     if (await evaluateCoin(cs, trigger, ctxSources, lessons, stats) === 'ai_failed') aiFailed.push({ cs, trigger });
   }
   // An AI outage or formatting failure must not reject an otherwise valid setup: give those coins one more try after the models have had time to recover.
-  if (aiFailed.length) {
+  if (aiFailed.length && llmUsable()) {
     logDecision('info', '*', `${aiFailed.length} setup(s) could not be judged because the AI failed (${aiFailed.map((x) => x.cs.symbol).join(', ')}): retrying`);
     await sleep(15_000);
     for (const { cs, trigger } of aiFailed) {
@@ -426,7 +454,7 @@ const promoted = new Map();
 let hotSymbols = new Set();
 let fastBusy = false;
 
-const fastAllowed = () => !state.scan.running && !!state.ctx && state.btc.bullish && llmAvailable() && riskLib.tradingGate(state.portfolio).allowed
+const fastAllowed = () => !state.scan.running && !!state.ctx && state.btc.bullish && llmUsable() && riskLib.tradingGate(state.portfolio).allowed
   && state.positions.size + state.pending.size < R.maxOpenPositions;
 const idle = (cs, now) => !cs.evaluating && !(cs.coin.cooldownUntil && cs.coin.cooldownUntil > now)
   && ![...state.positions.values()].some((p) => p.symbol === cs.symbol) && ![...state.pending.values()].some((p) => p.symbol === cs.symbol);
@@ -972,7 +1000,7 @@ async function reflect(pos, trade, actual) {
   const lessons = state.reflections.slice(0, 5).map((l) => ({ outcome: l.outcome, symbol: l.symbol, lesson: l.lesson }));
   const ctx = { copiedTrader: pos.copy ?? null, side: pos.side ?? 'long', confluence: pos.ctx.conf, researchSummary: pos.ctx.sig.evidenceSummary, supporting: pos.ctx.sig.supporting, conflicting: pos.ctx.sig.conflicting, patterns: pos.ctx.patterns, sentiment: pos.ctx.sentiment, btcRegime: pos.ctx.btc, entryRationale: pos.rationale };
   let r = null;
-  if (llmAvailable()) r = await reflectOnTrade({ ...trade, holdMinutes: +((Date.now() - pos.openedAt) / 60000).toFixed(1) }, ctx, lessons);
+  if (llmUsable()) r = await reflectOnTrade({ ...trade, holdMinutes: +((Date.now() - pos.openedAt) / 60000).toFixed(1) }, ctx, lessons);
   if (!r && pos.copy) {
     r = {
       actual_result: actual, indicators_correct: win ? [`trader's ${pos.side} call on ${pos.symbol} worked`] : [], indicators_wrong: win ? [] : [`trader's ${pos.side} call on ${pos.symbol} did not work out (exit: ${trade.exit_reason})`],
@@ -1143,7 +1171,7 @@ export function snapshotForUi() {
       sweepAt: radarState.at || null, sweeping: radarState.running, partial: radarState.partial, error: radarState.error,
       hotAt: radarState.hotAt || null, tailAt: radarState.tailAt || null, nextSweepAt: radarState.at ? radarState.at + (radarState.partial ? Z.retryMs : Z.everyMs) : null, coingecko: cgStats(),
       shortlistSize: state.shortlist.size, shortlistTarget: Z.shortlistSize, researchMax: Z.researchMax,
-      research: { ...llmStats, rate: llmStats.signals ? llmStats.signalsOk / llmStats.signals : null }, shortlist: state.shortlist.top, researchQueue: state.researchQueue, rejected: state.rejected, watchMovers: watchOnlyMovers(10),
+      research: { ...llmStats, rate: llmStats.signals ? llmStats.signalsOk / llmStats.signals : null, providers: llmProviders(), resumeAt: llmResumeAt() }, shortlist: state.shortlist.top, researchQueue: state.researchQueue, rejected: state.rejected, watchMovers: watchOnlyMovers(10),
     },
     newsFeed: state.newsFeed,
     decisions: state.decisions.slice(0, 100), reflections: state.reflections.slice(0, 40),
