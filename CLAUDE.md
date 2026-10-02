@@ -9,7 +9,7 @@ Save this content as `CLAUDE.md` in the root folder of your project (alongside `
 - Local Deployment: Strictly at http://localhost:4000. DO NOT create Vercel or cloud deployment files.
 - Single Environment File: Read credentials ONLY from one `.env` file in the project root. Never create `.env.local` or `.env.example`.
 - Hard Safety Switch: Explicit `PAPER_TRADING=true` required. Strictly paper trading with $2,000 USD virtual capital. Live order-placement functions are forbidden. Read-only exchange data allowed.
-- Dynamic Universe: The 100 largest cryptocurrencies by market cap that are actually tradable (listed on Coinbase USD; stablecoins and wrapped/staked tokens excluded). CoinGecko primary, CoinMarketCap secondary.
+- Dynamic Universe: EVERY cryptocurrency that is actually tradable (online Coinbase USD market; stablecoins and wrapped/staked tokens excluded), ~390 coins out of the 8,000+ CoinGecko tracks, ranked by market cap. CoinGecko primary, CoinMarketCap validates the top 300. The top 100 get full analysis every scan, the rest every 3rd scan; coins with < $1M 24h volume are tracked but never entered.
 
 ## Dual-Brain Architecture & Data Hierarchy
 - Data Hierarchy: Direct exchange feed > Specialized derivatives (Coinglass) > Official macro/gov (FRED/Congress) > Reputable news & on-chain. Timestamp and provenance required for all signals. No duplicate counting across aggregators.

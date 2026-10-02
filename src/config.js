@@ -94,6 +94,13 @@ export const config = {
     pollMs: 20_000, maxFillAgeMs: 300_000, pricePollMs: 5_000,
     minLiquidityUsd: 200_000, minVolume24hUsd: 100_000, minPairAgeDays: 3,   // only copy into tokens we could realistically exit
   }),
+  // Tradable universe: EVERY coin with an online Coinbase USD market (stablecoins and wrapped/staked tokens excluded), not just the top 100.
+  universe: Object.freeze({
+    maxCoins: 1000, maxPages: 12, pageDelayMs: 2500,   // CoinGecko pages of 250 coins, walked until every Coinbase USD market is matched
+    fullRefreshMs: 3600_000,                            // the deep pages (3+) refresh hourly; the top 500 refresh every scan
+    coreSize: 100, tailEvery: 3,                        // top 100 get full candle analysis every scan, everyone else every 3rd scan (or when first seen)
+    minVolume24hUsd: 1_000_000,                         // tracked regardless, but never ENTERED below this 24h volume: too thin to fill at the modelled slippage
+  }),
   // Trending / unusually-active detection. It only decides what gets researched FIRST; it never lowers a requirement.
   movers: Object.freeze({ chg1h: 0.04, chg4h: 0.08, chg24h: 0.15, rvol: 2.5, maxMoversPerScan: 3, fastTrigger1h: 0.08, fastCheckMs: 60_000, fastCooldownMs: 15 * 60_000 }),
   scanIntervalMs: 5 * 60_000,

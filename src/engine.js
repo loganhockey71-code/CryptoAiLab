@@ -13,6 +13,7 @@ import * as riskLib from './risk.js';
 import { guard } from './guardrails.js';
 
 const R = config.risk;
+const U = config.universe;
 const utcDay = (ts = Date.now()) => new Date(ts).toISOString().slice(0, 10);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const pct = (x) => (x * 100).toFixed(2) + '%';
@@ -120,7 +121,7 @@ async function analyzeCoin(coin) {
     const ageMin = (Date.now() / 1000 - last5.t) / 60;
     const priceDiff = Math.abs(last5.c - coin.price) / coin.price;
     if (ageMin > 20) cs.health = { ok: false, reason: `stale candles (${ageMin.toFixed(0)}m old)` };
-    else if (priceDiff > 0.05) cs.health = { ok: false, reason: `contradictory price: exchange ${last5.c} vs CoinGecko ${coin.price}` };
+    else if (priceDiff > ((Date.now() - (coin.priceAt ?? 0)) < 10 * 60_000 ? 0.05 : 0.25)) cs.health = { ok: false, reason: `contradictory price: exchange ${last5.c} vs CoinGecko ${coin.price}` };
     else cs.health = { ok: true, reason: null, checkedAt: Date.now() };
     cs.snaps = { '1d': snapshot(d1), '4h': snapshot(aggregate(h1, 4 * 3600)), '1h': snapshot(h1), '15m': snapshot(m15), '5m': snapshot(m5) };
     cs.rvol = calcRvol(m15);
@@ -166,8 +167,8 @@ async function runScan() {
     }
     const changes = await refreshUniverse(state.productSet);
     if (changes) {
-      for (const id of changes.added) { const c = universe.coins.get(id); logDecision('info', c.symbol, `entered the tradable Top 100 (market-cap rank #${c.cgRank})`); }
-      for (const id of changes.removed) logDecision('info', id, 'dropped out of the tradable Top 100');
+      for (const id of changes.added) { const c = universe.coins.get(id); logDecision('info', c.symbol, `entered the tradable universe (market-cap rank #${c.cgRank})`); }
+      for (const id of changes.removed) logDecision('info', id, 'dropped out of the tradable universe');
     }
     if (!universe.coins.size) throw new Error(`no universe available (${universe.lastError ?? 'unknown'})`);
     await restoreCooldowns();
@@ -179,9 +180,12 @@ async function runScan() {
 
     // BTC first so the regime gate is current before anything else is evaluated.
     tradable.sort((a, b) => (a.symbol === 'BTC' ? -1 : b.symbol === 'BTC' ? 1 : a.cgRank - b.cgRank));
+    // The top coreSize coins get full candle analysis every scan. Everyone else is refreshed every tailEvery-th scan (staggered), and always on first sight,
+    // so a ~390-coin universe still finishes a scan in a few minutes.
+    const todo = tradable.filter((c, idx) => idx < U.coreSize || c.symbol === 'BTC' || !state.coins.get(c.symbol)?.snaps?.['1h'] || (idx + s.count) % U.tailEvery === 0);
     let i = 0;
-    for (const coin of tradable) {
-      s.progress = `fetching candles ${++i}/${tradable.length} (${coin.symbol})`;
+    for (const coin of todo) {
+      s.progress = `fetching candles ${++i}/${todo.length} of ${tradable.length} coins (${coin.symbol})`;
       await analyzeCoin(coin);
     }
     for (const c of universe.coins.values()) if (!c.tradable) coinState(c.symbol).coin = c;
@@ -344,9 +348,9 @@ async function evaluateCandidates(ctxSources) {
   if (!llmAvailable()) { logDecision('info', '*', 'No LLM key configured (GEMINI_API_KEY / OPENROUTER_API_KEY): Research Brain offline, staying in cash'); return; }
 
   const now = Date.now();
-  // The WHOLE Top 100 is scanned. Anything that could still reach 80/100 is eligible, trending or not.
+  // The WHOLE tradable universe is scanned. Anything that could still reach 80/100 is eligible, trending or not.
   const eligible = [...state.coins.values()]
-    .filter((cs) => cs.coin?.tradable && cs.health.ok && cs.partialScore && cs.partialScore.total >= 30)
+    .filter((cs) => cs.coin?.tradable && cs.health.ok && cs.partialScore && cs.partialScore.total >= 30 && (cs.coin.volume24h ?? 0) >= U.minVolume24hUsd)
     .filter((cs) => !(cs.coin.cooldownUntil && cs.coin.cooldownUntil > now))
     .filter((cs) => now - (cs.lastLlmAt ?? 0) > 20 * 60_000)
     .filter((cs) => ![...state.positions.values()].some((p) => p.symbol === cs.symbol) && ![...state.pending.values()].some((p) => p.symbol === cs.symbol))
@@ -361,7 +365,7 @@ async function evaluateCandidates(ctxSources) {
     ...movers.map((x) => ({ cs: x.cs, trigger: { kind: 'mover', reasons: x.a.reasons, h1: x.a.h1, h24: x.a.h24, rvol: x.cs.rvol } })),
     ...regular.map((x) => ({ cs: x.cs, trigger: { kind: 'scan', reasons: [`technical + volume ${x.cs.partialScore.total.toFixed(0)}/50`], h1: x.a.h1, h24: x.a.h24, rvol: x.cs.rvol } })),
   ];
-  logDecision('info', '*', `scanned all ${state.coins.size} Top-100 coins: ${hotAll.length} trending/unusually active (${hotAll.slice(0, 6).map((c) => c.symbol).join(', ') || 'none'}); researching ${movers.length} mover(s) + ${regular.length} regular candidate(s)`);
+  logDecision('info', '*', `scanned all ${state.coins.size} tradable coins: ${hotAll.length} trending/unusually active (${hotAll.slice(0, 6).map((c) => c.symbol).join(', ') || 'none'}); researching ${movers.length} mover(s) + ${regular.length} regular candidate(s)`);
 
   const lessons = state.reflections.slice(0, 5);
   const stats = patternStats();
@@ -378,7 +382,7 @@ async function moverWatch() {
   if (state.positions.size + state.pending.size >= R.maxOpenPositions) return;
   const now = Date.now();
   const hit = [...state.coins.values()]
-    .filter((cs) => cs.coin?.tradable && cs.health?.ok && !cs.evaluating && !(cs.coin.cooldownUntil && cs.coin.cooldownUntil > now))
+    .filter((cs) => cs.coin?.tradable && cs.health?.ok && !cs.evaluating && (cs.coin.volume24h ?? 0) >= U.minVolume24hUsd && !(cs.coin.cooldownUntil && cs.coin.cooldownUntil > now))
     .filter((cs) => now - (cs.lastFast ?? 0) > MOVER.fastCooldownMs && now - (cs.lastLlmAt ?? 0) > MOVER.fastCooldownMs)
     .filter((cs) => ![...state.positions.values()].some((p) => p.symbol === cs.symbol) && ![...state.pending.values()].some((p) => p.symbol === cs.symbol))
     .map((cs) => ({ cs, a: activity(cs) }))
@@ -439,6 +443,7 @@ async function tryEnter(p, confirmation) {
       openCount: state.positions.size, cooldownUntil: cs?.coin?.cooldownUntil, dataFresh: fp.price != null,
     });
     if (live <= shaped.stop) reasons.push('price already at/below the stop level');
+    if ((cs?.coin?.volume24h ?? 0) < U.minVolume24hUsd) reasons.push(`24h volume $${Math.round(cs?.coin?.volume24h ?? 0).toLocaleString('en-US')} < $${U.minVolume24hUsd.toLocaleString('en-US')}: too thin to fill at the modelled slippage`);
     if (reasons.length) {
       await db.updateSignal(p.id, { status: 'skipped', skip_reason: reasons.join(' | '), rr: shaped.rr });
       if (cs?.signal) cs.signal.status = 'skipped';
@@ -995,7 +1000,7 @@ export function snapshotForUi() {
     else if (pend) signal = 'AWAITING CONFIRM';
     else if (cs?.signal && now - cs.signal.at < 2 * 3600_000) signal = `${cs.signal.direction} (${cs.signal.confidence.toFixed(0)}%) · ${cs.signal.status}`;
     return {
-      rank: coin.rank, cgRank: coin.cgRank, cmcRank: coin.cmcRank, discrepancy: coin.discrepancyNote, symbol: coin.symbol, name: coin.name, product: coin.product,
+      rank: coin.rank, cgRank: coin.cgRank, cmcRank: coin.cmcRank, volume24h: coin.volume24h ?? 0, thin: (coin.volume24h ?? 0) < U.minVolume24hUsd, discrepancy: coin.discrepancyNote, symbol: coin.symbol, name: coin.name, product: coin.product,
       price: (coin.product && feed.price(coin.product)) || coin.price, candle: f ? { o: f.o, h: f.h, l: f.l, c: f.c } : null,
       signal, score: cs?.score ?? null, rvol: cs?.rvol ?? null,
       funding: cs?.deriv?.ok ? cs.deriv.data.fundingRatePct : null, sentiment: cs?.sentiment?.score ?? null, sentimentCount: cs?.sentiment?.count ?? 0,

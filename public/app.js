@@ -87,7 +87,7 @@ function renderTable(s) {
   const sortKey = [...upOn].pop();
   if (sortKey) rows.sort((a, b) => perf[sortKey](b) - perf[sortKey](a));
   const tfName = { m1: '1m', h1: '1h', h24: '24h' };
-  $('#universe-note').textContent = upOn.size ? `${rows.length} of ${s.rows.length} rising on ${[...upOn].map((k) => tfName[k]).join(' + ')} · best ${tfName[sortKey]} first` : `${s.rows.length} tradable coins by market cap`;
+  $('#universe-note').textContent = upOn.size ? `${rows.length} of ${s.rows.length} rising on ${[...upOn].map((k) => tfName[k]).join(' + ')} · best ${tfName[sortKey]} first` : `${s.rows.length} tradable coins (every Coinbase USD market) by market cap`;
   document.querySelectorAll('#up-toggles .tog').forEach((b) => b.classList.toggle('on', upOn.has(b.dataset.tf)));
   tbody.innerHTML = rows.map((r) => {
     const c = r.candle;
@@ -96,6 +96,7 @@ function renderTable(s) {
     const gateCell = !r.tradable ? '<span class="muted">n/a</span>' : gate ? '<span class="pill good">open</span>' : '<span class="pill bad">closed</span>';
     const data = !r.tradable ? `<span class="muted" title="excluded">${esc(r.excluded)}</span>`
       : r.cooldownUntil ? `<span class="pill amber" title="2h stop-loss cooldown">cooldown</span>`
+      : r.thin ? `<span class="pill amber" title="24h volume $${Math.round(r.volume24h).toLocaleString('en-US')}: tracked, but never entered (too thin to fill)">thin volume</span>`
       : r.health === 'ok' ? (r.stale ? '<span class="pill amber">stale tick</span>' : '<span class="pill good">ok</span>')
       : `<span class="pill bad" title="${esc(r.health)}">unreliable</span>`;
     const disc = r.discrepancy ? ` <span class="warn" title="${esc(r.discrepancy)}">⚠</span>` : '';
