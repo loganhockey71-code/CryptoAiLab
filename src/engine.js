@@ -2,10 +2,10 @@
 // PAPER ONLY: this module never talks to any order endpoint. Positions are simulated in memory + Supabase.
 import { config, log, warn } from './config.js';
 import { db } from './db.js';
-import { feed, fetchCandles, loadProducts } from './exchange.js';
+import { feed, fetchCandles, loadProducts, fetchBook } from './exchange.js';
 import { hl } from './hyperliquid.js';
 import { onchainPx } from './onchainprices.js';
-import { refreshUniverse, restoreCooldowns, universe, cgTrending, radar as radarState, watchOnlyMovers } from './universe.js';
+import { refreshUniverse, restoreCooldowns, universe, cgTrending, radar as radarState, watchOnlyMovers, refreshHot, refreshTail, cgStats } from './universe.js';
 import * as radarLib from './radar.js';
 import { snapshot, aggregate, rvol as calcRvol, atr, ema, rsi, candlePattern } from './indicators.js';
 import * as src from './sources.js';
@@ -189,6 +189,7 @@ async function runScan() {
     const ranked = [...prio.entries()].sort((a, b) => b[1].score - a[1].score);
     const shortlist = new Set(ranked.slice(0, Z.shortlistSize).map(([sym]) => sym));
     for (const pos of state.positions.values()) shortlist.add(pos.symbol);
+    hotSymbols = shortlist;
     state.shortlist = { size: shortlist.size, top: ranked.slice(0, 25).map(([sym, p]) => ({ symbol: sym, score: +p.score.toFixed(0), reasons: p.reasons })) };
     // The shortlist is refreshed with candles every scan; everyone else every tailEvery-th scan (staggered) and on first sight, so any coin can move up the queue.
     const todo = tradable.filter((c, idx) => c.symbol === 'BTC' || shortlist.has(c.symbol) || !state.coins.get(c.symbol)?.snaps?.['1h'] || (idx + s.count) % U.tailEvery === 0)
@@ -217,7 +218,7 @@ async function runScan() {
     };
     for (const cs of state.coins.values()) cs.sentiment = cs.coin ? src.coinSentiment(news, cs.coin) : null;
 
-    state.trending = await cgTrending();
+    cgTrending().then((t) => { state.trending = t; }).catch(() => {});   // cached 15 min; never lets a CoinGecko rate-limit pause hold up the scan
     state.ctx = { news, macro, bills, onchain, politics };
     s.progress = 'evaluating setups';
     await evaluateCandidates({ news, macro, bills, onchain, politics });
@@ -310,9 +311,11 @@ async function evaluateCoinInner(cs, trigger, ctxSources, lessons, stats) {
     return;
   }
 
+  cs.book = await fetchBook(product).catch(() => null);          // spread + visible depth: context for the Research Brain and the evidence record, never a rule
   const provenance = {
     candles: { source: 'coinbase-exchange', tier: 1, at: cs.health.checkedAt }, priceAgeMs: fp.ageMs,
     derivatives: { source: deriv.source, tier: 2, at: deriv.fetchedAt },
+    orderBook: { source: 'coinbase-exchange level2', tier: 1, ok: !!cs.book, at: cs.book?.at ?? null },
     macro: { source: 'fred', tier: 3, ok: ctxSources.macro.ok, at: ctxSources.macro.fetchedAt },
     legislation: { source: 'congress.gov', tier: 3, ok: ctxSources.bills.ok, at: ctxSources.bills.fetchedAt },
     politics: { source: 'white house, federal register, fed, sec, cftc, bbc, npr, cnbc, google news, truth social mirror', tier: '3/4', ok: ctxSources.politics.ok, at: ctxSources.politics.fetchedAt },
@@ -323,7 +326,7 @@ async function evaluateCoinInner(cs, trigger, ctxSources, lessons, stats) {
   const act = activity(cs);
   const sig = await generateSignal({
     symbol: cs.symbol, name: cs.coin.name, stopBand: riskLib.stopBand(cs.symbol, cs.coin.rank), targetBand: R.targetBands[riskLib.stopBand(cs.symbol, cs.coin.rank).tier], price: fp.price, btcRegime: state.btc.regime, timeframes: tfSummary, rvol: cs.rvol,
-    derivatives: deriv.data, macro: ctxSources.macro.data, legislation: ctxSources.bills.data, onchain: ctxSources.onchain.data, politics: compactPolitics(ctxSources.politics),
+    derivatives: deriv.data, orderBook: cs.book ?? 'unavailable', macro: ctxSources.macro.data, legislation: ctxSources.bills.data, onchain: ctxSources.onchain.data, politics: compactPolitics(ctxSources.politics),
     news: cs.sentiment ? { coin: cs.sentiment, market: (ctxSources.news.data || []).slice(0, 8) } : { market: (ctxSources.news.data || []).slice(0, 8) },
     activity: { whySelected: trigger.kind === 'mover' ? 'unusually active / trending' : 'regular scan', flags: act.reasons, change1h: pct(act.h1), change24h: act.h24 == null ? null : pct(act.h24) },
     smartMoney: sm ? { trackedTradersLong: sm.longs, trackedTradersShort: sm.shorts, detail: sm.traders.map((t) => ({ side: t.side, winRate: +t.winRate.toFixed(2) })) } : 'no tracked trader currently holds this coin',
@@ -338,7 +341,7 @@ async function evaluateCoinInner(cs, trigger, ctxSources, lessons, stats) {
   cs.score = conf.total; cs.signalFresh = Date.now();
   const gates = riskLib.requirements(conf, sm);
   conf.gates = gates;
-  const evidence = { provenance, trigger, smartMoney: sm, supporting: sig.supporting, conflicting: sig.conflicting, keyRisks: sig.keyRisks, provider: sig.provider, historyMultiplier: mult, patternStats: stats };
+  const evidence = { provenance, trigger, smartMoney: sm, orderBook: cs.book ?? null, supporting: sig.supporting, conflicting: sig.conflicting, keyRisks: sig.keyRisks, provider: sig.provider, historyMultiplier: mult, patternStats: stats };
   const base = { direction: sig.direction, confidence: sig.confidence, confluence: conf, evidence };
 
   cs.signal = { direction: sig.direction, confidence: sig.confidence, at: Date.now(), status: 'evaluated' };
@@ -411,28 +414,88 @@ async function evaluateCandidates(ctxSources) {
   }
 }
 
+/** Coins the cheap CoinGecko refresh flagged as unusual (symbol -> { h1, reasons }), waiting for the fast path below. */
+const promoted = new Map();
+let hotSymbols = new Set();
+let fastBusy = false;
+
+const fastAllowed = () => !state.scan.running && !!state.ctx && state.btc.bullish && llmAvailable() && riskLib.tradingGate(state.portfolio).allowed
+  && state.positions.size + state.pending.size < R.maxOpenPositions;
+const idle = (cs, now) => !cs.evaluating && !(cs.coin.cooldownUntil && cs.coin.cooldownUntil > now)
+  && ![...state.positions.values()].some((p) => p.symbol === cs.symbol) && ![...state.pending.values()].some((p) => p.symbol === cs.symbol);
+
+/** Re-analyse ONE coin right now (fresh candles) and run the normal evaluation. Same gates as a scan: nothing is relaxed. */
+async function fastScan(cs, why, reasons) {
+  cs.lastFast = Date.now();
+  logDecision('info', cs.symbol, `FAST SCAN: ${why}. Re-analysing now instead of waiting for the next scan`);
+  await analyzeCoin(cs.coin);
+  if (!cs.health.ok || rejectFor(cs)) return;
+  cs.partialScore = partialScore(cs);
+  const a = activity(cs);
+  await evaluateCoin(cs, { kind: 'mover', fast: true, reasons: a.reasons.length ? a.reasons : reasons, h1: a.h1, h24: a.h24, rvol: cs.rvol }, state.ctx, state.reflections.slice(0, 5), patternStats());
+}
+
+/** Promote coins the cheap refresh saw ripping (1h move or a volume jump) without waiting for the next full sweep or scan. */
+function notePromotions(unusual) {
+  const now = Date.now();
+  for (const u of unusual) {
+    const cs = state.coins.get(u.symbol);
+    if (!cs?.coin?.tradable || now - (cs.lastPromoted ?? 0) < Z.promoteCooldownMs) continue;
+    if (radarLib.rejectReason(cs.coin)) continue;                // cheap screens first (illiquid, tiny, wash-trading, thin spike): never worth a candle fetch
+    cs.lastPromoted = now;
+    promoted.set(u.symbol, { ...u, at: now });
+  }
+  if (promoted.size) drainPromoted().catch((e) => warn('promotion', e.message));
+}
+
+async function drainPromoted() {
+  if (fastBusy) return;
+  fastBusy = true;
+  try {
+    while (promoted.size && fastAllowed()) {
+      const [sym, u] = [...promoted.entries()].sort((a, b) => b[1].h1 - a[1].h1)[0];
+      promoted.delete(sym);
+      const cs = state.coins.get(sym), now = Date.now();
+      if (now - u.at > 10 * 60_000) continue;                    // a spike we could not act on (scan running, BTC bearish, slots full) goes stale
+      if (!cs?.coin?.tradable || !idle(cs, now) || now - (cs.lastFast ?? 0) < MOVER.fastCooldownMs || now - (cs.lastLlmAt ?? 0) < MOVER.fastCooldownMs) continue;
+      await fastScan(cs, `promoted by the CoinGecko refresh (${u.reasons.join(', ')})`, u.reasons);
+    }
+  } finally { fastBusy = false; }
+}
+
+/** Keep the coins we can trade fresh between full sweeps: shortlist + open positions often, the rest of the tradable set less often. Never waits for, or blocks, the scan. */
+let hotBusy = false, tailBusy = false;
+const hotIds = () => {
+  const ids = new Set();
+  for (const sym of hotSymbols) { const id = state.coins.get(sym)?.coin?.id; if (id) ids.add(id); }
+  for (const pos of state.positions.values()) { const id = pos.symbol && state.coins.get(pos.symbol)?.coin?.id; if (id) ids.add(id); }
+  return ids;
+};
+async function hotRefresh() {
+  if (hotBusy || !universe.coins.size) return;
+  hotBusy = true;
+  try { const r = await refreshHot([...hotIds()]); if (r.error) warn('CoinGecko hot refresh:', r.error); notePromotions(r.unusual); } finally { hotBusy = false; }
+}
+async function tailRefresh() {
+  if (tailBusy || !universe.coins.size) return;
+  tailBusy = true;
+  try { const r = await refreshTail([...hotIds()]); if (r.error) warn('CoinGecko tradable refresh:', r.error); notePromotions(r.unusual); } finally { tailBusy = false; }
+}
+
 /** Between full scans: if something is suddenly ripping (e.g. +8% in an hour), analyse it now instead of waiting up to 5 minutes. */
 async function moverWatch() {
-  if (state.scan.running || !state.ctx || !state.btc.bullish || !llmAvailable()) return;
-  if (!riskLib.tradingGate(state.portfolio).allowed) return;
-  if (state.positions.size + state.pending.size >= R.maxOpenPositions) return;
+  if (!fastAllowed()) return;
+  await drainPromoted();
+  if (!fastAllowed()) return;
   const now = Date.now();
   const hit = [...state.coins.values()]
-    .filter((cs) => cs.coin?.tradable && cs.health?.ok && !cs.evaluating && !rejectFor(cs) && !(cs.coin.cooldownUntil && cs.coin.cooldownUntil > now))
+    .filter((cs) => cs.coin?.tradable && cs.health?.ok && !rejectFor(cs) && idle(cs, now))
     .filter((cs) => now - (cs.lastFast ?? 0) > MOVER.fastCooldownMs && now - (cs.lastLlmAt ?? 0) > MOVER.fastCooldownMs)
-    .filter((cs) => ![...state.positions.values()].some((p) => p.symbol === cs.symbol) && ![...state.pending.values()].some((p) => p.symbol === cs.symbol))
     .map((cs) => ({ cs, a: activity(cs) }))
     .filter((x) => x.a.h1 >= MOVER.fastTrigger1h)
     .sort((a, b) => b.a.h1 - a.a.h1)[0];
   if (!hit) return;
-  const { cs } = hit;
-  cs.lastFast = now;
-  logDecision('info', cs.symbol, `FAST SCAN: up ${pct(hit.a.h1)} in the last hour. Re-analysing now instead of waiting for the next scan`);
-  await analyzeCoin(cs.coin);
-  if (!cs.health.ok) return;
-  cs.partialScore = partialScore(cs);
-  const a = activity(cs);
-  await evaluateCoin(cs, { kind: 'mover', fast: true, reasons: a.reasons.length ? a.reasons : [`1h ${pct(hit.a.h1)}`], h1: a.h1, h24: a.h24, rvol: cs.rvol }, state.ctx, state.reflections.slice(0, 5), patternStats());
+  await fastScan(hit.cs, `up ${pct(hit.a.h1)} in the last hour`, hit.a.reasons.length ? hit.a.reasons : [`1h ${pct(hit.a.h1)}`]);
 }
 
 /* ------------------------------------------------- candle confirmation + entry */
@@ -1013,6 +1076,8 @@ export async function start() {
   feed.start();
   setInterval(() => housekeeping().catch((e) => warn('housekeeping', e.message)), 1000);
   setInterval(() => moverWatch().catch((e) => warn('mover watch', e.message)), config.movers.fastCheckMs);
+  setInterval(() => hotRefresh().catch((e) => warn('hot refresh', e.message)), Z.hotEveryMs);          // independent of the scan and of the full sweep
+  setInterval(() => tailRefresh().catch((e) => warn('tradable refresh', e.message)), Z.tradableEveryMs);
   setInterval(() => persistPortfolio(), 15_000);
 
   (async () => {
@@ -1069,6 +1134,7 @@ export function snapshotForUi() {
     radar: {
       monitored: radarState.rows.size, tradable: universe.coins.size, watchOnly: Math.max(0, radarState.rows.size - universe.coins.size),
       sweepAt: radarState.at || null, sweeping: radarState.running, partial: radarState.partial, error: radarState.error,
+      hotAt: radarState.hotAt || null, tailAt: radarState.tailAt || null, nextSweepAt: radarState.at ? radarState.at + (radarState.partial ? Z.retryMs : Z.everyMs) : null, coingecko: cgStats(),
       shortlistSize: state.shortlist.size, shortlistTarget: Z.shortlistSize, researchMax: Z.researchMax,
       shortlist: state.shortlist.top, researchQueue: state.researchQueue, rejected: state.rejected, watchMovers: watchOnlyMovers(10),
     },

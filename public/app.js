@@ -217,6 +217,8 @@ function renderRadar(r) {
   $('#radar-chips').innerHTML = [
     chip('Coins monitored', r.monitored.toLocaleString('en-US')), chip('Tradable here', r.tradable), chip('Watch only', r.watchOnly.toLocaleString('en-US')),
     chip('Shortlist', `${r.shortlistSize}/${r.shortlistTarget}`), chip('Deep research slots', r.researchMax), chip('Last sweep', r.sweeping ? 'sweeping…' : r.sweepAt ? ago(r.sweepAt) : '—', r.error ? 'warn' : ''),
+    chip('Tradable refresh', r.hotAt ? ago(r.hotAt) : '—'), chip('Next full sweep', r.nextSweepAt ? (r.nextSweepAt > Date.now() ? 'in ' + Math.round((r.nextSweepAt - Date.now()) / 60000) + 'm' : 'due') : '—'),
+    chip('CoinGecko calls 24h', r.coingecko ? r.coingecko.callsLast24h.toLocaleString('en-US') : '—', r.coingecko?.pausedUntil ? 'warn' : ''),
     chip('Screened out', rej || 'none'),
   ].join('');
   const rows = (list, fmt) => (list.length ? list.map(fmt).join('') : '<div class="empty">Nothing yet.</div>');

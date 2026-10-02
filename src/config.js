@@ -104,7 +104,16 @@ export const config = {
   // Market radar funnel. Stage 0: sweep ~8,200 coins on cheap data only. Stage 1: a dynamic shortlist gets candle analysis every scan.
   // Stage 2: only the strongest few are deeply researched (derivatives, news, macro, smart money, AI). Coins that cannot be traded here are watch-only.
   radar: Object.freeze({
-    everyMs: 10 * 60_000, retryMs: 3 * 60_000, maxPages: 34,   // a partial (rate-limited) sweep is retried after retryMs pageDelayMs: 2500,   // CoinGecko pages of 250 coins, ~8,500 coins max
+    // Discovery (every coin CoinGecko lists, 250 per page, ~8,500 coins) is slow-changing: a full sweep every 3h is enough. A rate-limited sweep resumes from the page it stopped at.
+    everyMs: 3 * 60 * 60_000, retryMs: 5 * 60_000, maxPages: 34,
+    // Coins we can actually trade are refreshed far more often with ONE batched call per 250 ids (no full sweep needed): the shortlist + open positions every hotEveryMs,
+    // every other tradable coin every tradableEveryMs. Both feed the same radar rows, so priorities and the shortlist stay current between sweeps.
+    hotEveryMs: 5 * 60_000, tradableEveryMs: 30 * 60_000, idsPerCall: 250,
+    // A coin the cheap refresh sees ripping (1h change, or its 24h volume jumping since the previous refresh) is promoted to analysis right away.
+    promote1h: 0.05, promoteVolJump: 0.5, promoteCooldownMs: 15 * 60_000,
+    // CoinGecko rate limiting: calls are serialised with this minimum gap (keyed plans allow ~30/min, the public tier far less). A 429 pauses ALL calls (Retry-After, else exponential backoff).
+    gapMs: Object.freeze({ keyed: 2_500, public: 6_500 }), maxRetries: 4, backoffBaseMs: 30_000, backoffMaxMs: 5 * 60_000,
+    trendingEveryMs: 15 * 60_000, cmcEveryMs: 60 * 60_000,
     shortlistSize: 150,                                       // 100-300: refreshed with candles every scan
     researchMax: 20,                                          // 10-30: deep research slots per scan
     minMcapUsd: 5_000_000, maxVolMcap: 3, washCapCeiling: 500_000_000,   // manipulation screens
