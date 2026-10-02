@@ -37,6 +37,9 @@ a.stat.jump span { color: #26a69a; }
 .table-panel { grid-area: table; } .chart-panel { grid-area: chart; } .pos-panel { grid-area: pos; } .log-panel { grid-area: log; } .learn-panel { grid-area: learn; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; min-width: 0; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+.radar-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; padding: 8px 12px 12px; }
+.radar-cols h3 { margin: 0 0 6px; font-size: 12px; } .radar-cols h3 small { color: var(--muted); font-weight: 400; margin-left: 4px; }
+.radar-cols .scroll { max-height: 220px; } .radar-row { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
 .toggles { display: flex; gap: 6px; margin-left: auto; }
 .tog { background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; font: inherit; font-size: 12px; cursor: pointer; }
 .tog:hover { color: var(--text, #e6e9ef); }

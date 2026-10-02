@@ -49,7 +49,7 @@ function nonTradableReason(c) {
   return null;
 }
 
-const U = config.universe;
+const Z = config.radar;
 /** CoinGecko's trending list (top searched coins), as a set of CoinGecko ids. Best-effort: empty on failure. */
 export async function cgTrending() {
   try { const j = await cgFetch('/search/trending'); return new Set((j.coins ?? []).map((c) => c.item?.id).filter(Boolean)); }
@@ -58,72 +58,90 @@ export async function cgTrending() {
 
 export const universe = { coins: new Map(), updatedAt: 0, cmcAvailable: false, lastError: null, coinbaseMarkets: 0 };
 
-const page = (n) => cgFetch(`/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=${n}&sparkline=false`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-let deep = { at: 0, rows: [] };   // CoinGecko pages 3+ (smaller coins), refreshed hourly
+const frac = (x) => (x == null || Number.isNaN(Number(x)) ? null : Number(x) / 100);   // CoinGecko sends percentages
+
+/** Stage 0 of the funnel: cheap data for EVERY coin CoinGecko lists (~8,200). Price, market cap, volume, 1h/24h/7d change. */
+export const radar = { rows: new Map(), at: 0, running: false, pages: 0, partial: false, error: null };
+
+async function sweepRadar(limit = Z.maxPages) {
+  if (radar.running) return;
+  radar.running = true;
+  const next = new Map();
+  let pages = 0, failedAt = null, lastErr = null;
+  try {
+    for (let n = 1; n <= limit; n++) {
+      if (n > 1) await sleep(Z.pageDelayMs);
+      let got = null;
+      for (let attempt = 0; attempt < 2 && !got; attempt++) {
+        try { got = await cgFetch(`/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=${n}&sparkline=false&price_change_percentage=1h,24h,7d`); }
+        catch (e) { lastErr = e.message; if (attempt === 0) await sleep(20_000); }
+      }
+      if (!got) { failedAt = n; break; }
+      if (!got.length) break;                                   // past the end of CoinGecko's list
+      pages++;
+      const now = Date.now();
+      for (const c of got) {
+        const prev = radar.rows.get(c.id);
+        next.set(c.id, {
+          id: c.id, symbol: String(c.symbol).toUpperCase(), name: c.name, cgRank: c.market_cap_rank, mcap: c.market_cap, price: c.current_price, vol24: c.total_volume,
+          chg1h: frac(c.price_change_percentage_1h_in_currency), chg24h: frac(c.price_change_percentage_24h_in_currency ?? c.price_change_percentage_24h), chg7d: frac(c.price_change_percentage_7d_in_currency),
+          prev: prev ? { price: prev.price, vol24: prev.vol24, at: prev.at } : null, at: now, _page: n, tradable: prev?.tradable ?? false,
+        });
+      }
+    }
+    // Keep what we already knew about any pages this sweep did not reach (rate limit, or a short first sweep).
+    const reached = failedAt ? failedAt - 1 : limit;
+    for (const [id, row] of radar.rows) if (!next.has(id) && row._page > reached) next.set(id, row);
+    if (next.size) { radar.rows = next; radar.at = Date.now(); radar.pages = pages; radar.partial = !!failedAt || limit < Z.maxPages; radar.error = failedAt ? `rate limited at page ${failedAt} (${lastErr})` : null; }
+    else radar.error = lastErr ?? 'empty sweep';
+  } finally { radar.running = false; }
+  if (radar.error) warn('CoinGecko radar sweep:', radar.error);
+  else log(`Radar sweep: ${radar.rows.size} coins monitored (${pages} pages)`);
+}
 
 /** Every online Coinbase USD market that CoinGecko can identify (and that is not a stablecoin / wrapped token), best market cap first. */
 export async function refreshUniverse(productSet) {
-  let markets;
-  try {
-    const top = [...await page(1), ...await page(2)].map((c) => ({ ...c, _at: Date.now() }));
-    if (Date.now() - deep.at > U.fullRefreshMs || !deep.rows.length) {
-      const rows = [], matched = new Set();
-      const want = new Set([...productSet].map((p) => p.replace(/-USD$/, '')));
-      for (const c of top) if (productSet.has(`${c.symbol.toUpperCase()}-USD`)) matched.add(c.symbol.toUpperCase());
-      let partial = false;
-      for (let n = 3; n <= U.maxPages && matched.size < want.size; n++) {
-        await sleep(U.pageDelayMs);
-        let got = null;
-        for (let attempt = 0; attempt < 2 && !got; attempt++) {
-          try { got = await page(n); } catch (e) { if (attempt === 0) await sleep(20_000); else warn(`CoinGecko page ${n} failed (${e.message})`); }
-        }
-        if (!got) { partial = true; rows.push(...deep.rows.filter((r) => r._page >= n)); break; }   // keep the deeper coins we already knew about
-        for (const c of got) { rows.push({ ...c, _at: Date.now(), _page: n }); if (productSet.has(`${c.symbol.toUpperCase()}-USD`)) matched.add(c.symbol.toUpperCase()); }
-      }
-      // After a partial pull, try the missing pages again in ~5 minutes instead of waiting a full hour.
-      if (rows.length || !deep.rows.length) deep = { at: partial ? Date.now() - U.fullRefreshMs + 5 * 60_000 : Date.now(), rows };
-    }
-    const seen = new Set(top.map((c) => c.id));
-    markets = top.concat(deep.rows.filter((c) => !seen.has(c.id)));
-  } catch (e) {
-    universe.lastError = e.message;
-    warn('CoinGecko universe refresh failed:', e.message);
-    return null; // keep the previous universe rather than guessing
-  }
+  if (!radar.rows.size) {
+    await sweepRadar(3);                                         // the first 750 coins cover nearly every Coinbase market: start fast...
+    if (radar.rows.size) sweepRadar().catch((e) => warn('radar sweep', e.message));   // ...then finish the full sweep in the background
+  } else if (Date.now() - radar.at > (radar.partial ? Z.retryMs : Z.everyMs) && !radar.running) sweepRadar().catch((e) => warn('radar sweep', e.message));
+  if (!radar.rows.size) { universe.lastError = radar.error; warn('CoinGecko universe refresh failed:', radar.error); return null; }   // keep the previous universe
   universe.lastError = null;
   const cmc = await cmcTop100();
   universe.cmcAvailable = !!cmc;
 
+  const markets = [...radar.rows.values()].sort((a, b) => (a.cgRank ?? 1e9) - (b.cgRank ?? 1e9));
   const prevIds = new Set(universe.coins.keys());
   const next = new Map();
   const rows = [];
   const seenSymbols = new Set();
   let tradeRank = 0;
+  for (const r of markets) r.tradable = false;
   for (const c of markets) {
-    const symbol = c.symbol.toUpperCase();
+    const symbol = c.symbol;
     const product = `${symbol}-USD`;
-    const reason = nonTradableReason(c) || (productSet.has(product) ? null : 'no Coinbase USD market') || (seenSymbols.has(symbol) ? 'duplicate symbol' : null);
-    if (reason) continue;                         // not tradable: not part of the universe
-    if (tradeRank >= U.maxCoins) break;
+    const reason = nonTradableReason({ name: c.name, symbol, current_price: c.price }) || (productSet.has(product) ? null : 'no Coinbase USD market') || (seenSymbols.has(symbol) ? 'duplicate symbol' : null);
+    if (reason) continue;                         // not tradable here: stays on the radar as watch-only
     seenSymbols.add(symbol); tradeRank++;
+    c.tradable = true;
     const cmcRank = cmc?.get(symbol) ?? null;
     let discrepancy = false, note = null;
-    if (cmc && c.market_cap_rank <= 300) {
-      if (cmcRank == null) { discrepancy = true; note = `CoinGecko #${c.market_cap_rank}, absent from CoinMarketCap top 300`; }
-      else if (Math.abs(cmcRank - c.market_cap_rank) > 5) { discrepancy = true; note = `CoinGecko #${c.market_cap_rank} vs CoinMarketCap #${cmcRank}`; }
+    if (cmc && c.cgRank != null && c.cgRank <= 300) {
+      if (cmcRank == null) { discrepancy = true; note = `CoinGecko #${c.cgRank}, absent from CoinMarketCap top 300`; }
+      else if (Math.abs(cmcRank - c.cgRank) > 5) { discrepancy = true; note = `CoinGecko #${c.cgRank} vs CoinMarketCap #${cmcRank}`; }
     }
     const prior = universe.coins.get(c.id);
     const coin = {
-      id: c.id, symbol, name: c.name, rank: tradeRank, cgRank: c.market_cap_rank, cmcRank, discrepancy, discrepancyNote: note,
-      marketCap: c.market_cap, price: c.current_price, priceAt: c._at, volume24h: c.total_volume ?? 0, product,
+      id: c.id, symbol, name: c.name, rank: tradeRank, cgRank: c.cgRank, cmcRank, discrepancy, discrepancyNote: note,
+      marketCap: c.mcap, mcap: c.mcap, price: c.price, priceAt: c.at, volume24h: c.vol24 ?? 0, vol24: c.vol24, chg1h: c.chg1h, chg24h: c.chg24h, chg7d: c.chg7d, prev: c.prev, product,
       tradable: true, excludedReason: null,
       cooldownUntil: prior?.cooldownUntil ?? null,
     };
     next.set(c.id, coin);
     rows.push({
-      coingecko_id: c.id, symbol, name: c.name, cg_rank: c.market_cap_rank, cmc_rank: cmcRank,
-      rank_discrepancy: discrepancy, discrepancy_note: note, market_cap: c.market_cap, price: c.current_price,
+      coingecko_id: c.id, symbol, name: c.name, cg_rank: c.cgRank, cmc_rank: cmcRank,
+      rank_discrepancy: discrepancy, discrepancy_note: note, market_cap: c.mcap, price: c.price,
       coinbase_product: coin.product, tradable: coin.tradable, active: true, removed_at: null,
       last_seen_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     });
@@ -135,8 +153,15 @@ export async function refreshUniverse(productSet) {
   universe.coinbaseMarkets = productSet.size;
   if (!prevIds.size || added.length || removed.length || Date.now() - (universe.dbAt ?? 0) > 3600_000) { universe.dbAt = Date.now(); await db.upsertCoins(rows); await db.deactivateCoins(removed); }
   if (prevIds.size) { if (added.length || removed.length) log(`Universe refreshed: +${added.length} added, -${removed.length} removed (${next.size} tradable coins)`); }
-  else log(`Universe loaded: ${next.size} tradable coins = every coin with a Coinbase USD market that CoinGecko identifies (${productSet.size} Coinbase USD markets; deepest CoinGecko rank #${Math.max(...[...next.values()].map((c) => c.cgRank))})`);
+  else log(`Universe loaded: ${next.size} tradable coins of ${radar.rows.size} monitored (${productSet.size} Coinbase USD markets)`);
   return { added: prevIds.size ? added : [], removed };
+}
+
+/** Biggest movers among coins that cannot be traded here: visible for context, never researched or entered. */
+export function watchOnlyMovers(n = 12) {
+  return [...radar.rows.values()].filter((r) => !r.tradable && (r.vol24 ?? 0) >= 1_000_000 && (r.mcap ?? 0) >= 5_000_000)
+    .sort((a, b) => Math.max((b.chg1h ?? 0) * 3, b.chg24h ?? 0) - Math.max((a.chg1h ?? 0) * 3, a.chg24h ?? 0)).slice(0, n)
+    .map((r) => ({ symbol: r.symbol, name: r.name, cgRank: r.cgRank, price: r.price, chg1h: r.chg1h, chg24h: r.chg24h, vol24: r.vol24 }));
 }
 
 // Restore stop-loss cooldowns persisted in Supabase after a restart.

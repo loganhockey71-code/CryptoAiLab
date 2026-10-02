@@ -96,16 +96,22 @@ export const config = {
   }),
   // Tradable universe: EVERY coin with an online Coinbase USD market (stablecoins and wrapped/staked tokens excluded), not just the top 100.
   universe: Object.freeze({
-    maxCoins: 1000, maxPages: 12, pageDelayMs: 2500,   // CoinGecko pages of 250 coins, walked until every Coinbase USD market is matched
-    fullRefreshMs: 3600_000,                            // the deep pages (3+) refresh hourly; the top 500 refresh every scan
-    coreSize: 100, tailEvery: 3,                        // top 100 get full candle analysis every scan, everyone else every 3rd scan (or when first seen)
+    tailEvery: 3,                                       // coins outside the shortlist still get full candle analysis every 3rd scan (and on first sight)
     minVolume24hUsd: 1_000_000,                         // tracked regardless, but never ENTERED below this 24h volume: too thin to fill at the modelled slippage
+  }),
+  // Market radar funnel. Stage 0: sweep ~8,200 coins on cheap data only. Stage 1: a dynamic shortlist gets candle analysis every scan.
+  // Stage 2: only the strongest few are deeply researched (derivatives, news, macro, smart money, AI). Coins that cannot be traded here are watch-only.
+  radar: Object.freeze({
+    everyMs: 10 * 60_000, retryMs: 3 * 60_000, maxPages: 34,   // a partial (rate-limited) sweep is retried after retryMs pageDelayMs: 2500,   // CoinGecko pages of 250 coins, ~8,500 coins max
+    shortlistSize: 150,                                       // 100-300: refreshed with candles every scan
+    researchMax: 20,                                          // 10-30: deep research slots per scan
+    minMcapUsd: 5_000_000, maxVolMcap: 3, washCapCeiling: 500_000_000,   // manipulation screens
+    thinSpikePct: 0.20, thinSpikeVol: 3_000_000,
   }),
   // Trending / unusually-active detection. It only decides what gets researched FIRST; it never lowers a requirement.
   movers: Object.freeze({ chg1h: 0.04, chg4h: 0.08, chg24h: 0.15, rvol: 2.5, maxMoversPerScan: 3, fastTrigger1h: 0.08, fastCheckMs: 60_000, fastCooldownMs: 15 * 60_000 }),
   scanIntervalMs: 5 * 60_000,
   confirmWindowMs: 15 * 60_000,
-  maxResearchPerScan: 6,
 };
 
 export const log = (...a) => console.log(new Date().toISOString(), ...a);

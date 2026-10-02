@@ -5,7 +5,8 @@ import { db } from './db.js';
 import { feed, fetchCandles, loadProducts } from './exchange.js';
 import { hl } from './hyperliquid.js';
 import { onchainPx } from './onchainprices.js';
-import { refreshUniverse, restoreCooldowns, universe, cgTrending } from './universe.js';
+import { refreshUniverse, restoreCooldowns, universe, cgTrending, radar as radarState, watchOnlyMovers } from './universe.js';
+import * as radarLib from './radar.js';
 import { snapshot, aggregate, rvol as calcRvol, atr, ema, rsi, candlePattern } from './indicators.js';
 import * as src from './sources.js';
 import { generateSignal, reflectOnTrade, llmAvailable } from './research.js';
@@ -13,7 +14,7 @@ import * as riskLib from './risk.js';
 import { guard } from './guardrails.js';
 
 const R = config.risk;
-const U = config.universe;
+const U = config.universe, Z = config.radar;
 const utcDay = (ts = Date.now()) => new Date(ts).toISOString().slice(0, 10);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const pct = (x) => (x * 100).toFixed(2) + '%';
@@ -28,6 +29,9 @@ export const state = {
   reflections: [],             // newest first (AI learning feed)
   closedToday: [],             // closed trades since UTC midnight
   recentClosed: [],            // newest first, feeds the Trade History panel
+  shortlist: { size: 0, top: [] },   // stage 1 of the funnel: coins that get candle analysis every scan
+  researchQueue: [],           // stage 2: the coins deeply researched in the latest scan
+  rejected: {},                // why coins were screened out as illiquid / manipulated-looking / unreliable (latest scan)
   closedTotal: 0,              // every trade ever closed (top-bar counter; recentClosed is capped at 200)
   trending: new Set(),         // CoinGecko trending ids, refreshed every scan
   ctx: null,                   // latest news/macro/politics context, reused by the fast mover scan
@@ -180,9 +184,15 @@ async function runScan() {
 
     // BTC first so the regime gate is current before anything else is evaluated.
     tradable.sort((a, b) => (a.symbol === 'BTC' ? -1 : b.symbol === 'BTC' ? 1 : a.cgRank - b.cgRank));
-    // The top coreSize coins get full candle analysis every scan. Everyone else is refreshed every tailEvery-th scan (staggered), and always on first sight,
-    // so a ~390-coin universe still finishes a scan in a few minutes.
-    const todo = tradable.filter((c, idx) => idx < U.coreSize || c.symbol === 'BTC' || !state.coins.get(c.symbol)?.snaps?.['1h'] || (idx + s.count) % U.tailEvery === 0);
+    for (const c of tradable) coinState(c.symbol).coin = c;
+    const prio = new Map(tradable.map((c) => [c.symbol, priorityOf(state.coins.get(c.symbol))]));
+    const ranked = [...prio.entries()].sort((a, b) => b[1].score - a[1].score);
+    const shortlist = new Set(ranked.slice(0, Z.shortlistSize).map(([sym]) => sym));
+    for (const pos of state.positions.values()) shortlist.add(pos.symbol);
+    state.shortlist = { size: shortlist.size, top: ranked.slice(0, 25).map(([sym, p]) => ({ symbol: sym, score: +p.score.toFixed(0), reasons: p.reasons })) };
+    // The shortlist is refreshed with candles every scan; everyone else every tailEvery-th scan (staggered) and on first sight, so any coin can move up the queue.
+    const todo = tradable.filter((c, idx) => c.symbol === 'BTC' || shortlist.has(c.symbol) || !state.coins.get(c.symbol)?.snaps?.['1h'] || (idx + s.count) % U.tailEvery === 0)
+      .sort((a, b) => (a.symbol === 'BTC' ? -1 : b.symbol === 'BTC' ? 1 : (prio.get(b.symbol)?.score ?? 0) - (prio.get(a.symbol)?.score ?? 0)));
     let i = 0;
     for (const coin of todo) {
       s.progress = `fetching candles ${++i}/${todo.length} of ${tradable.length} coins (${coin.symbol})`;
@@ -250,6 +260,22 @@ export function activity(cs) {
   const dump = live.h1 <= -MOVER.chg1h || (cs.chg?.h24 ?? 0) <= -MOVER.chg24h;   // unusual, but we only buy: flagged, never prioritised
   return { hot: reasons.length > 0, score, reasons, h1: live.h1, h24: cs.chg?.h24 ?? null, dump };
 }
+/** Cheap research priority for a coin (radar data + whatever technical state we already hold). Higher = look sooner. */
+function priorityOf(cs) {
+  if (!cs?.coin) return { score: 0, reasons: [] };
+  const sm = smartMoneyProvider ? smartMoneyProvider(cs.symbol) : null;
+  return radarLib.radarPriority(cs.coin, { rvol: cs.rvol, smartMoney: sm, sentiment: cs.sentiment, partial: cs.partialScore?.total, partialDelta: cs.partialDelta });
+}
+
+/** Illiquid, tiny, manipulated-looking or data-poor coins are rejected outright. Returns { code, text } or null. */
+function rejectFor(cs) {
+  const r = radarLib.rejectReason(cs?.coin);
+  if (r) return r;
+  const sn = cs.snaps ?? {};
+  if (!sn['1h'] || !sn['15m'] || !sn['5m']) return { code: 'insufficient_data', text: 'insufficient candle history (need 55+ candles on 1h, 15m and 5m)' };
+  return null;
+}
+
 const rowActivity = (cs) => { const a = activity(cs); return { chg1h: a.h1, chg24h: a.h24, hot: a.hot, hotReasons: a.reasons, dump: a.dump }; };
 
 /* ------------------------------------------------------------ evaluation */
@@ -337,7 +363,7 @@ async function evaluateCoinInner(cs, trigger, ctxSources, lessons, stats) {
 async function evaluateCandidates(ctxSources) {
   const gate = riskLib.tradingGate(state.portfolio);
   const open = state.positions.size + state.pending.size;
-  for (const cs of state.coins.values()) { const p = partialScore(cs); cs.partialScore = p; if (!cs.signalFresh) cs.score = p ? p.total : null; }
+  for (const cs of state.coins.values()) { const p = partialScore(cs); cs.partialDelta = p && cs.partialScore ? p.total - cs.partialScore.total : 0; cs.partialScore = p; if (!cs.signalFresh) cs.score = p ? p.total : null; }
 
   if (!state.btc.bullish) {
     logDecision('skipped', 'BTC', `BTC 1h regime is ${state.btc.regime}: all long entries suspended this scan`);
@@ -348,24 +374,24 @@ async function evaluateCandidates(ctxSources) {
   if (!llmAvailable()) { logDecision('info', '*', 'No LLM key configured (GEMINI_API_KEY / OPENROUTER_API_KEY): Research Brain offline, staying in cash'); return; }
 
   const now = Date.now();
-  // The WHOLE tradable universe is scanned. Anything that could still reach 80/100 is eligible, trending or not.
-  const eligible = [...state.coins.values()]
-    .filter((cs) => cs.coin?.tradable && cs.health.ok && cs.partialScore && cs.partialScore.total >= 30 && (cs.coin.volume24h ?? 0) >= U.minVolume24hUsd)
+  // Stage 2 of the funnel. The whole universe has been scanned cheaply; only coins that pass the screens AND still could reach 80/100 are candidates,
+  // and only the strongest researchMax by priority get the expensive work. A coin needs no trending flag and no top-100 rank to qualify.
+  const rejected = {};
+  const candidates = [...state.coins.values()]
+    .filter((cs) => cs.coin?.tradable && cs.health.ok && cs.partialScore && cs.partialScore.total >= 30)
     .filter((cs) => !(cs.coin.cooldownUntil && cs.coin.cooldownUntil > now))
     .filter((cs) => now - (cs.lastLlmAt ?? 0) > 20 * 60_000)
     .filter((cs) => ![...state.positions.values()].some((p) => p.symbol === cs.symbol) && ![...state.pending.values()].some((p) => p.symbol === cs.symbol))
-    .map((cs) => ({ cs, a: activity(cs) }));
+    .filter((cs) => { const r = rejectFor(cs); if (r) rejected[r.code] = (rejected[r.code] ?? 0) + 1; return !r; });
+  state.rejected = rejected;
   const hotAll = [...state.coins.values()].filter((cs) => cs.coin?.tradable && cs.health.ok && activity(cs).hot);
-
-  // Trending / unusually active assets are looked at FIRST, then the best of the rest fill the remaining research slots.
-  const movers = eligible.filter((x) => x.a.hot && !x.a.dump).sort((a, b) => b.a.score - a.a.score).slice(0, MOVER.maxMoversPerScan);
-  const moverSet = new Set(movers.map((x) => x.cs));
-  const regular = eligible.filter((x) => !moverSet.has(x.cs)).sort((a, b) => b.cs.partialScore.total - a.cs.partialScore.total).slice(0, Math.max(0, config.maxResearchPerScan - movers.length));
-  const lineup = [
-    ...movers.map((x) => ({ cs: x.cs, trigger: { kind: 'mover', reasons: x.a.reasons, h1: x.a.h1, h24: x.a.h24, rvol: x.cs.rvol } })),
-    ...regular.map((x) => ({ cs: x.cs, trigger: { kind: 'scan', reasons: [`technical + volume ${x.cs.partialScore.total.toFixed(0)}/50`], h1: x.a.h1, h24: x.a.h24, rvol: x.cs.rvol } })),
-  ];
-  logDecision('info', '*', `scanned all ${state.coins.size} tradable coins: ${hotAll.length} trending/unusually active (${hotAll.slice(0, 6).map((c) => c.symbol).join(', ') || 'none'}); researching ${movers.length} mover(s) + ${regular.length} regular candidate(s)`);
+  const ranked = candidates.map((cs) => ({ cs, a: activity(cs), p: priorityOf(cs) })).sort((x, y) => y.p.score - x.p.score);
+  const lineup = ranked.slice(0, Z.researchMax).map(({ cs, a, p }) => ({
+    cs, trigger: { kind: a.hot && !a.dump ? 'mover' : 'scan', reasons: p.reasons.length ? p.reasons : [`technical + volume ${cs.partialScore.total.toFixed(0)}/50`], priority: +p.score.toFixed(0), h1: a.h1, h24: a.h24, rvol: cs.rvol },
+  }));
+  state.researchQueue = lineup.map(({ cs, trigger }) => ({ symbol: cs.symbol, priority: trigger.priority, reasons: trigger.reasons }));
+  const rejSummary = Object.entries(rejected).map(([k, n]) => `${n} ${k.replace('_', ' ')}`).join(', ');
+  logDecision('info', '*', `radar: ${radarState.rows.size} coins monitored, ${state.coins.size} tradable, shortlist ${state.shortlist.size}; ${candidates.length} candidate(s) passed the screens${rejSummary ? ` (rejected: ${rejSummary})` : ''}; ${hotAll.length} trending/unusually active; deep-researching ${lineup.length}: ${lineup.slice(0, 6).map((x) => x.cs.symbol).join(', ') || 'none'}`);
 
   const lessons = state.reflections.slice(0, 5);
   const stats = patternStats();
@@ -382,7 +408,7 @@ async function moverWatch() {
   if (state.positions.size + state.pending.size >= R.maxOpenPositions) return;
   const now = Date.now();
   const hit = [...state.coins.values()]
-    .filter((cs) => cs.coin?.tradable && cs.health?.ok && !cs.evaluating && (cs.coin.volume24h ?? 0) >= U.minVolume24hUsd && !(cs.coin.cooldownUntil && cs.coin.cooldownUntil > now))
+    .filter((cs) => cs.coin?.tradable && cs.health?.ok && !cs.evaluating && !rejectFor(cs) && !(cs.coin.cooldownUntil && cs.coin.cooldownUntil > now))
     .filter((cs) => now - (cs.lastFast ?? 0) > MOVER.fastCooldownMs && now - (cs.lastLlmAt ?? 0) > MOVER.fastCooldownMs)
     .filter((cs) => ![...state.positions.values()].some((p) => p.symbol === cs.symbol) && ![...state.pending.values()].some((p) => p.symbol === cs.symbol))
     .map((cs) => ({ cs, a: activity(cs) }))
@@ -443,7 +469,7 @@ async function tryEnter(p, confirmation) {
       openCount: state.positions.size, cooldownUntil: cs?.coin?.cooldownUntil, dataFresh: fp.price != null,
     });
     if (live <= shaped.stop) reasons.push('price already at/below the stop level');
-    if ((cs?.coin?.volume24h ?? 0) < U.minVolume24hUsd) reasons.push(`24h volume $${Math.round(cs?.coin?.volume24h ?? 0).toLocaleString('en-US')} < $${U.minVolume24hUsd.toLocaleString('en-US')}: too thin to fill at the modelled slippage`);
+    const rj = rejectFor(cs); if (rj) reasons.push(rj.text);
     if (reasons.length) {
       await db.updateSignal(p.id, { status: 'skipped', skip_reason: reasons.join(' | '), rr: shaped.rr });
       if (cs?.signal) cs.signal.status = 'skipped';
@@ -470,7 +496,7 @@ async function tryEnter(p, confirmation) {
     const id = row?.id ?? `mem-trade-${Date.now()}`;
     state.portfolio.cash -= notional + fee;
     state.positions.set(id, {
-      id, symbol: p.symbol, product: p.product, signalId: p.id, qty, entry: entryPx, notional, fee, stop: stopPx, stopPct: fin.stopPct, riskUsd: fin.riskUsd, target: shaped.target, band: shaped.band, partialTaken: false, horizonHours: clampN(p.sig.timeframeHours ?? 24, 1, 48),
+      id, symbol: p.symbol, product: p.product, signalId: p.id, qty, entry: entryPx, notional, fee, stop: stopPx, stopPct: fin.stopPct, riskUsd: fin.riskUsd, target: shaped.target, band: shaped.band, partialTaken: false, horizonHours: clampN(p.sig.timeframeHours ?? 24, 1, 72),
       trailing: null, highWater: entryPx, openedAt: Date.now(), rationale: why, lastPrice: live, sizePct, trigger: p.trigger ?? { kind: 'scan', reasons: [] },
       ctx: { conf: p.conf, sig: p.sig, patterns: p.ctx.patterns, sentiment: p.ctx.sentiment, btc: btc.regime, confirmation },
     });
@@ -960,7 +986,7 @@ export async function start() {
       highWater: Number(t.high_water ?? t.entry_price), openedAt: new Date(t.entry_time).getTime(), rationale: t.rationale, lastPrice: null,
       ...(isCopy
         ? { venue: t.source === 'copy_zerion' ? 'onchain' : 'hl', extra: t.prediction ?? null, coin: t.source === 'copy_zerion' ? (t.prediction?.assetKey ?? t.symbol) : t.symbol, leaderSize: Number(t.leader_size ?? 0), copy: { trader: t.source_trader, winRate: Number(t.confidence ?? 0) / 100, tier: t.prediction?.tier ?? 'minimum', leaderPx: Number(t.leader_fill_price), leaderTime: new Date(t.leader_fill_time).getTime(), k: Number(t.prediction?.k ?? 0), latencyMs: 0 } }
-        : { product: `${t.symbol}-USD`, horizonHours: clampN(Number(t.prediction?.timeframe_hours) || 24, 1, 48), trigger: { kind: t.entry_trigger ?? 'scan', reasons: t.prediction?.trigger?.reasons ?? [] } }),
+        : { product: `${t.symbol}-USD`, horizonHours: clampN(Number(t.prediction?.timeframe_hours) || 24, 1, 72), trigger: { kind: t.entry_trigger ?? 'scan', reasons: t.prediction?.trigger?.reasons ?? [] } }),
       ctx: { conf: { notes: {}, technical: 0, rvol: 0, research: 0, derivatives: 0, total: Number(t.confluence_score ?? 0) }, sig: { evidenceSummary: t.evidence_used ?? '', supporting: [], conflicting: [], confidence: Number(t.confidence ?? 0) }, patterns: {}, btc: t.market_regime },
     });
   }
@@ -1025,6 +1051,12 @@ export function snapshotForUi() {
     btc: state.btc, scan: state.scan, health: dataHealth(), rows, positions,
     history: historySummary(),
     tradeCount: state.closedTotal,
+    radar: {
+      monitored: radarState.rows.size, tradable: universe.coins.size, watchOnly: Math.max(0, radarState.rows.size - universe.coins.size),
+      sweepAt: radarState.at || null, sweeping: radarState.running, partial: radarState.partial, error: radarState.error,
+      shortlistSize: state.shortlist.size, shortlistTarget: Z.shortlistSize, researchMax: Z.researchMax,
+      shortlist: state.shortlist.top, researchQueue: state.researchQueue, rejected: state.rejected, watchMovers: watchOnlyMovers(10),
+    },
     newsFeed: state.newsFeed,
     decisions: state.decisions.slice(0, 100), reflections: state.reflections.slice(0, 40),
     pending: [...state.pending.values()].map((x) => ({ symbol: x.symbol, refPrice: x.refPrice, createdAt: x.createdAt, score: x.conf.total })),

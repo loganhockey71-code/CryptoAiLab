@@ -77,7 +77,7 @@ const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
 
 /** ctx: { symbol, name, price, btcRegime, timeframes, rvol, derivatives, news, macro, legislation, onchain, provenance } */
 export async function generateSignal(ctx, lessons) {
-  const prompt = `You are the Research Brain of a paper-trading system (long-only, spot). Assess whether ${ctx.symbol} (${ctx.name}) has a bullish setup over a horizon of 1 to 48 hours. Many of the best trades are held for 1-2 days, so do not assume a quick exit: choose the horizon the higher timeframes (1h/4h/1d) actually support. A separate deterministic engine will verify candle confirmation and every risk rule; you only produce a structured signal.
+  const prompt = `You are the Research Brain of a paper-trading system (long-only, spot). Assess whether ${ctx.symbol} (${ctx.name}) has a bullish setup over a horizon of 1 to 72 hours. Positions may last minutes, hours or 2+ days; many of the best are held for 1-2 days, so do not assume a quick exit: choose the horizon the higher timeframes (1h/4h/1d) actually support. A separate deterministic engine will verify candle confirmation and every risk rule; you only produce a structured signal.
 
 ${STYLE}
 
@@ -102,7 +102,7 @@ Rules:
 - Political items are market-wide context, not coin-specific evidence. Prefer Tier 3 over Tier 4; treat social-media posts and headlines as unverified. Count them under "macro_gov". If a high-impact event from the last 24 hours (rate decision, tariffs, sanctions, an executive order or SEC/CFTC action touching crypto or markets) makes the setup riskier, lower confidence and say so in key_risks. Never invent a causal link between an event and this coin.
 - target_price and stop_price must be consistent with direction "bullish": stop_price < price < target_price. Stop distance must be inside this coin's band (${JSON.stringify(ctx.stopBand)}: min/max as fractions below price). It can NEVER be wider than ${config.risk.stopAbsMaxPct * 100}%, for any coin including memes; position size is derived from the stop, so a wider stop is not available.
 - target_price is where a PARTIAL profit is taken, the rest then trails. Aim it inside this coin's target band (${JSON.stringify(ctx.targetBand)} as fractions above price; memes may go higher). Net R:R vs your stop must be at least ${config.risk.minRR}. Do not inflate the target to pass R:R; if the setup only supports a smaller move, return neutral.
-- timeframe_hours is your intended holding period, between 1 and 48. Use 24-48 when the 4h/1d trend supports it and only use 6 or less for a genuinely short-lived setup.
+- timeframe_hours is your intended holding period, between 1 and 72. Use 24-72 when the 4h/1d trend supports it and only use 6 or less for a genuinely short-lived setup.
 - "supporting_sources" and "conflicting_sources" must only contain values from: "exchange_technicals", "derivatives", "macro_gov", "news_onchain", "smart_money".
 
 ${lessonsBlock(lessons)}

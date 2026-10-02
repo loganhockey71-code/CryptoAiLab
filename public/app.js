@@ -210,9 +210,25 @@ function renderCopy(c) {
     : `<div class="empty">Scanning the Hyperliquid leaderboard and on-chain wallets and scoring traders. Nobody is copied until they pass: win rate ≥ 75%, ≥ 30 closed trades, 7+ days of history, profit factor ≥ 1.5.</div>`);
 }
 
+function renderRadar(r) {
+  if (!r) return;
+  const chip = (label, val, c = '') => `<div class="chip"><b class="${c}">${val}</b><span>${label}</span></div>`;
+  const rej = Object.entries(r.rejected || {}).map(([k, n]) => `${n} ${k.replace('_', ' ')}`).join(', ');
+  $('#radar-chips').innerHTML = [
+    chip('Coins monitored', r.monitored.toLocaleString('en-US')), chip('Tradable here', r.tradable), chip('Watch only', r.watchOnly.toLocaleString('en-US')),
+    chip('Shortlist', `${r.shortlistSize}/${r.shortlistTarget}`), chip('Deep research slots', r.researchMax), chip('Last sweep', r.sweeping ? 'sweeping…' : r.sweepAt ? ago(r.sweepAt) : '—', r.error ? 'warn' : ''),
+    chip('Screened out', rej || 'none'),
+  ].join('');
+  const rows = (list, fmt) => (list.length ? list.map(fmt).join('') : '<div class="empty">Nothing yet.</div>');
+  const why = (x) => esc((x.reasons || []).slice(0, 3).join(' · ') || '—');
+  $('#radar-queue').innerHTML = rows(r.researchQueue, (x) => `<div class="radar-row"><span><b>${esc(x.symbol)}</b> <span class="muted">${why(x)}</span></span><span>${x.priority}</span></div>`);
+  $('#radar-short').innerHTML = rows(r.shortlist, (x) => `<div class="radar-row"><span><b>${esc(x.symbol)}</b> <span class="muted">${why(x)}</span></span><span>${x.score}</span></div>`);
+  $('#radar-watch').innerHTML = rows(r.watchMovers, (x) => `<div class="radar-row"><span><b>${esc(x.symbol)}</b> <span class="muted">${esc(x.name)}${x.cgRank ? ` · #${x.cgRank}` : ''}</span></span><span class="${cls(x.chg24h)}">${x.chg1h == null ? '—' : (x.chg1h * 100).toFixed(1) + '%'} / ${x.chg24h == null ? '—' : (x.chg24h * 100).toFixed(1) + '%'}</span></div>`);
+}
+
 function render(s) {
   latest = s;
-  renderStats(s); renderTable(s); renderPositions(s); renderHistory(s.history); renderNews(s.newsFeed); renderCopy(s.copy); renderDecisions(s); renderReflections(s);
+  renderStats(s); renderTable(s); renderPositions(s); renderHistory(s.history); renderNews(s.newsFeed); renderRadar(s.radar); renderCopy(s.copy); renderDecisions(s); renderReflections(s);
 }
 
 $('#copy').addEventListener('click', async (e) => {
