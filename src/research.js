@@ -59,6 +59,10 @@ export function parseJson(text) {
   return null;
 }
 
+/** Research Brain health counters since startup (for the dashboard): why signals are missing, not just that they are. */
+export const llmStats = { since: Date.now(), signals: 0, signalsOk: 0, noSignal: 0, invalid: 0, unparseable: 0, transient: 0, hard: 0, lastError: null, lastErrorAt: null, lastOkAt: null, lastOkProvider: null };
+const noteError = (kind, text) => { llmStats[kind]++; llmStats.lastError = text; llmStats.lastErrorAt = Date.now(); };
+
 const isTransient = (e) => /-> (408|425|429|500|502|503|504)/.test(e.message) || e.name === 'TimeoutError' || e.name === 'AbortError' || /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket|network/i.test(e.message);
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -80,9 +84,11 @@ IMPORTANT: respond with ONE valid JSON object only: no markdown, no commentary, 
         try {
           const out = parseJson(await fn(attempt === 0 ? prompt : strict));
           if (out) return { json: out, provider: name };
+          noteError('unparseable', `${name}: unparseable JSON`);
           warn(`${name} returned unparseable JSON${attempt === 0 ? ', retrying with a stricter instruction' : ''}`);
         } catch (e) {
-          if (isTransient(e)) { warn(`${name} busy/slow (${e.message.replace(/\s+/g, ' ').slice(0, 80)})${attempt === 0 ? ', retrying once' : ', trying the next model'}`); if (attempt === 0) await sleepMs(1500); continue; }
+          if (isTransient(e)) { noteError('transient', `${name}: ${e.message.replace(/\s+/g, ' ').slice(0, 100)}`); warn(`${name} busy/slow (${e.message.replace(/\s+/g, ' ').slice(0, 80)})${attempt === 0 ? ', retrying once' : ', trying the next model'}`); if (attempt === 0) await sleepMs(1500); continue; }
+          noteError('hard', `${name}: ${e.message.replace(/\s+/g, ' ').slice(0, 100)}`);
           warn(`LLM call failed (${name}):`, e.message.replace(/\s+/g, ' ').slice(0, 160));
           break;                                                  // a hard error (bad key, bad request) will not fix itself on retry
         }
@@ -138,12 +144,13 @@ Return JSON with exactly these keys:
 
   // A formatting slip must not cost a valid setup: validate (leniently), and if the answer is unusable ask once more, saying what was wrong.
   let problem = null;
+  llmStats.signals++;
   for (let attempt = 0; attempt < 2; attempt++) {
     const out = await llmJson(attempt === 0 ? prompt : `${prompt}\n\nYour previous answer was rejected: ${problem}. Return the corrected JSON object only.`);
-    if (!out) return null;                                       // every model failed or timed out: the caller retries this coin later instead of rejecting it
+    if (!out) { llmStats.noSignal++; return null; }              // every model failed or timed out: the caller retries this coin later instead of rejecting it
     const v = validateSignal(out.json, ctx.price);
-    if (v.ok) return { provider: out.provider, ...v.signal };
-    problem = v.problem;
+    if (v.ok) { llmStats.signalsOk++; llmStats.lastOkAt = Date.now(); llmStats.lastOkProvider = out.provider; return { provider: out.provider, ...v.signal }; }
+    problem = v.problem; noteError('invalid', `invalid signal: ${problem}`.slice(0, 140));
     warn(`invalid LLM signal for ${ctx.symbol} (${problem})${attempt === 0 ? ', asking once more' : ''}`);
   }
   return null;

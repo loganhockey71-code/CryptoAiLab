@@ -9,7 +9,7 @@ import { refreshUniverse, restoreCooldowns, universe, cgTrending, radar as radar
 import * as radarLib from './radar.js';
 import { snapshot, aggregate, rvol as calcRvol, atr, ema, rsi, candlePattern } from './indicators.js';
 import * as src from './sources.js';
-import { generateSignal, reflectOnTrade, llmAvailable } from './research.js';
+import { generateSignal, reflectOnTrade, llmAvailable, llmStats } from './research.js';
 import * as riskLib from './risk.js';
 import { guard } from './guardrails.js';
 
@@ -332,7 +332,7 @@ async function evaluateCoinInner(cs, trigger, ctxSources, lessons, stats) {
     smartMoney: sm ? { trackedTradersLong: sm.longs, trackedTradersShort: sm.shorts, detail: sm.traders.map((t) => ({ side: t.side, winRate: +t.winRate.toFixed(2) })) } : 'no tracked trader currently holds this coin',
     provenance,
   }, lessons.map((l) => ({ outcome: l.outcome, symbol: l.symbol, lesson: l.lesson })));
-  if (!sig) { await recordSkipped(cs, 'Research Brain unavailable or returned no usable signal after retries: the setup was NOT judged, will be retried', { evidence: { trigger } }); return 'ai_failed'; }
+  if (!sig) { await recordSkipped(cs, `Research Brain unavailable or returned no usable signal after retries (last error: ${llmStats.lastError ?? 'none recorded'}): the setup was NOT judged, will be retried`, { evidence: { trigger } }); return 'ai_failed'; }
   cs.lastLlmAt = Date.now();
 
   const mult = historyMultiplier(cs.symbol);
@@ -386,12 +386,19 @@ async function evaluateCandidates(ctxSources) {
     .filter((cs) => now - (cs.lastLlmAt ?? 0) > 20 * 60_000)
     .filter((cs) => ![...state.positions.values()].some((p) => p.symbol === cs.symbol) && ![...state.pending.values()].some((p) => p.symbol === cs.symbol))
     .filter((cs) => { const r = rejectFor(cs); if (r) rejected[r.code] = (rejected[r.code] ?? 0) + 1; return !r; });
-  state.rejected = rejected;
   const hotAll = [...state.coins.values()].filter((cs) => cs.coin?.tradable && cs.health.ok && activity(cs).hot);
   const ranked = candidates.map((cs) => ({ cs, a: activity(cs), p: priorityOf(cs) })).sort((x, y) => y.p.score - x.p.score);
-  const lineup = ranked.slice(0, Z.researchMax).map(({ cs, a, p }) => ({
-    cs, trigger: { kind: a.hot && !a.dump ? 'mover' : 'scan', reasons: p.reasons.length ? p.reasons : [`technical + volume ${cs.partialScore.total.toFixed(0)}/50`], priority: +p.score.toFixed(0), h1: a.h1, h24: a.h24, rvol: cs.rvol },
-  }));
+  // Deep-research slots go to candidates whose price is verifiably fresh (same 30s evaluation rule evaluateCoin enforces): a thinly traded coin whose last trade
+  // is minutes old would only burn a slot and be dropped at the first check, so the next-best qualified candidate gets that slot instead. Nothing is loosened.
+  const lineup = [], stale = [];
+  for (const { cs, a, p } of ranked) {
+    if (lineup.length >= Z.researchMax || stale.length >= 3 * Z.researchMax) break;
+    const fp = await feed.freshPrice(cs.coin.product, R.evalStaleMs);
+    if (fp.price == null) { stale.push(cs.symbol); continue; }
+    lineup.push({ cs, trigger: { kind: a.hot && !a.dump ? 'mover' : 'scan', reasons: p.reasons.length ? p.reasons : [`technical + volume ${cs.partialScore.total.toFixed(0)}/50`], priority: +p.score.toFixed(0), h1: a.h1, h24: a.h24, rvol: cs.rvol } });
+  }
+  if (stale.length) rejected.stale_price = stale.length;
+  state.rejected = rejected;
   state.researchQueue = lineup.map(({ cs, trigger }) => ({ symbol: cs.symbol, priority: trigger.priority, reasons: trigger.reasons }));
   const rejSummary = Object.entries(rejected).map(([k, n]) => `${n} ${k.replace('_', ' ')}`).join(', ');
   logDecision('info', '*', `radar: ${radarState.rows.size} coins monitored, ${state.coins.size} tradable, shortlist ${state.shortlist.size}; ${candidates.length} candidate(s) passed the screens${rejSummary ? ` (rejected: ${rejSummary})` : ''}; ${hotAll.length} trending/unusually active; deep-researching ${lineup.length}: ${lineup.slice(0, 6).map((x) => x.cs.symbol).join(', ') || 'none'}`);
@@ -1136,7 +1143,7 @@ export function snapshotForUi() {
       sweepAt: radarState.at || null, sweeping: radarState.running, partial: radarState.partial, error: radarState.error,
       hotAt: radarState.hotAt || null, tailAt: radarState.tailAt || null, nextSweepAt: radarState.at ? radarState.at + (radarState.partial ? Z.retryMs : Z.everyMs) : null, coingecko: cgStats(),
       shortlistSize: state.shortlist.size, shortlistTarget: Z.shortlistSize, researchMax: Z.researchMax,
-      shortlist: state.shortlist.top, researchQueue: state.researchQueue, rejected: state.rejected, watchMovers: watchOnlyMovers(10),
+      research: { ...llmStats, rate: llmStats.signals ? llmStats.signalsOk / llmStats.signals : null }, shortlist: state.shortlist.top, researchQueue: state.researchQueue, rejected: state.rejected, watchMovers: watchOnlyMovers(10),
     },
     newsFeed: state.newsFeed,
     decisions: state.decisions.slice(0, 100), reflections: state.reflections.slice(0, 40),
