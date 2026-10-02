@@ -11,6 +11,7 @@ import { snapshot, aggregate, rvol as calcRvol, atr, ema, rsi, candlePattern } f
 import * as src from './sources.js';
 import { generateSignal, reflectOnTrade, llmAvailable, llmUsable, llmResumeAt, llmPressure, llmProviders, llmStats } from './research.js';
 import * as riskLib from './risk.js';
+import { downtrendSignal } from './exits.js';
 import { guard } from './guardrails.js';
 
 const R = config.risk;
@@ -689,6 +690,14 @@ function onMomentumCheck(product) {
     const lowerLows = c1.l < c2.l && c2.l < c3.l, volDeclining = c1.v < c2.v && c2.v < c3.v;
     const e21 = ema(closes, 21), emaBreak = e21.length && closes.slice(-2).every((c) => c < e21[e21.length - 1]) && r < 45;
     const swing = isSwing(pos), cs1h = state.coins.get(pos.symbol)?.snaps?.['1h'];
+    // A LOSING position in a confirmed, continuing downtrend (lower highs and lows on 5m, under the EMA, RSI weak and falling, no bounce) is cut now instead of
+    // waiting for the stop. Needs 3 consecutive 1m closes of confirmation. Winners are handled by the trail / trend_break / momentum_reversal rules below.
+    const dt = downtrendSignal({ pos, price, closed1m: closed, riskDist: pos.entry * (pos.stopPct ?? bandOf(pos).max), swing, snap1h: cs1h });
+    pos.dtChecks = dt.fire ? (pos.dtChecks ?? 0) + 1 : 0;
+    if (dt.fire && pos.dtChecks >= config.exits.downtrend.confirmChecks) {
+      logDecision('info', pos.symbol, `downtrend exit instead of waiting for the stop: ${dt.detail}`);
+      closePosition(pos, price, 'downtrend_exit'); continue;
+    }
     if (swing) {
       // Swing hold (1-2 days): ignore 1-minute noise entirely. Leave on a broken 1h trend, otherwise let the stop / Chandelier trail decide.
       pos.momFactor = 1;
@@ -787,7 +796,7 @@ export async function closePosition(pos, price, reason) {
     gross_pnl: gross, final_pnl: finalPnl, final_pnl_pct: finalPct, actual_result: actual, high_water: pos.highWater, trailing_stop: pos.trailing,
   });
   logDecision('exit', pos.symbol, `${reason}: net P&L $${finalPnl.toFixed(2)} (${pct(finalPct)})${pos.copy ? ` [copy of ${pos.copy.trader.slice(0, 8)}]` : ''}`);
-  if (reason === 'stop_loss') {
+  if (reason === 'stop_loss' || reason === 'downtrend_exit') {         // do not buy straight back into a coin that just kept falling
     const until = Date.now() + R.assetCooldownHours * 3600_000;
     if (pos.venue === 'hl') state.copyCooldown.set(pos.coin, until);
     else {
@@ -1109,6 +1118,7 @@ export async function start() {
   feed.on('candle', (product, candle) => { onCandleClosed(product, candle); onMomentumCheck(product); });
   feed.setProducts([...state.positions.values()].map((p) => p.product).filter(Boolean));
   feed.start();
+  for (const pos of state.positions.values()) if (pos.product) feed.backfill1m(pos.product);   // a resumed position needs candle history for its exit rules straight away
   setInterval(() => housekeeping().catch((e) => warn('housekeeping', e.message)), 1000);
   setInterval(() => moverWatch().catch((e) => warn('mover watch', e.message)), config.movers.fastCheckMs);
   setInterval(() => hotRefresh().catch((e) => warn('hot refresh', e.message)), Z.hotEveryMs);          // independent of the scan and of the full sweep

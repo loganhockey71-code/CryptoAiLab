@@ -141,6 +141,9 @@ export const config = {
   llm: Object.freeze({ maxDiscoveriesPerSignal: 3, openrouterRefreshMs: 6 * 3600_000, maxAttemptsPerSignal: 2, authDownMs: 6 * 3600_000, quotaFallbackMs: 2 * 3600_000, rateFallbackMs: 60_000, maxDownMs: 26 * 3600_000, pressureMaxSignals: 5 }),
   // Trending / unusually-active detection. It only decides what gets researched FIRST; it never lowers a requirement.
   movers: Object.freeze({ chg1h: 0.04, chg4h: 0.08, chg24h: 0.15, rvol: 2.5, maxMoversPerScan: 3, fastTrigger1h: 0.08, fastCheckMs: 60_000, fastCooldownMs: 15 * 60_000 }),
+  // Loss-side early exit (see src/exits.js): a losing long in a confirmed, continuing downtrend is closed BEFORE its stop. It can only exit earlier / at a smaller loss than the
+  // stop, so it never adds risk. It is a risk rule: self-learning must never change it.
+  exits: Object.freeze({ downtrend: Object.freeze({ minLossR: 0.3, minHoldMs: 10 * 60_000, confirmChecks: 3, lowerBars: 3, rsiMax: 40 }) }),
   scanIntervalMs: 5 * 60_000,
   confirmWindowMs: 15 * 60_000,
 };

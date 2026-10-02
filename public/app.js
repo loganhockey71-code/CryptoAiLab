@@ -141,7 +141,7 @@ function renderReflections(s) {
     : '<div class="empty">No completed trades yet. A post-mortem is written after every trade, win or lose.</div>';
 }
 
-const reasonLabel = { stop_loss: 'hit stop-loss', trailing_stop: 'trailing stop', momentum_reversal: 'momentum reversed', leader_exit: 'trader exited', leader_flip: 'trader flipped', leader_exit_while_offline: 'trader exited (offline)', circuit_breaker_daily_loss: 'daily loss cap' };
+const reasonLabel = { stop_loss: 'hit stop-loss', downtrend_exit: 'downtrend: cut early', trailing_stop: 'trailing stop', momentum_reversal: 'momentum reversed', leader_exit: 'trader exited', leader_flip: 'trader flipped', leader_exit_while_offline: 'trader exited (offline)', circuit_breaker_daily_loss: 'daily loss cap' };
 const sourceLabel = (t) => (t.source === 'copy_hyperliquid' ? `copy · Hyperliquid ${t.trader ? t.trader.slice(0, 6) : ''}` : t.source === 'copy_zerion' ? `copy · on-chain ${t.trader ? t.trader.slice(0, 6) : ''}` : 'LLM strategy');
 const typePill = (t) => (t.origin === 'mimic'
   ? `<span class="pill amber">MIMIC</span> <span class="muted">${esc(sourceLabel(t).replace('copy · ', ''))}</span>`
