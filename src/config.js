@@ -66,7 +66,9 @@ export const config = {
     maxConsecutiveLossDays: 3,
     feePct: 0.001,
     slippagePct: 0.0005,
-    staleMs: 10_000,
+    staleMs: 10_000,             // execution price must be this fresh: checked again immediately before any paper entry
+    evalStaleMs: 30_000,         // candidate EVALUATION may use a price up to this old (slower coins); never used for execution
+    maxEntryDriftPct: 0.005,     // reject an entry if the execution price is more than 0.5% away from the price the setup was confirmed at
     trailActivatePct: 0.015,
   }),
   // Copy-trading selection + execution rules. The win-rate floor is hard: nobody below 75% is ever tracked.

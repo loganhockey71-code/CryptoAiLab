@@ -37,31 +37,56 @@ async function callOpenRouter(prompt) {
   return j.choices?.[0]?.message?.content ?? '';
 }
 
-function parseJson(text) {
-  const t = text.trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
-  try { return JSON.parse(t); } catch { /* fall through */ }
-  const m = t.match(/\{[\s\S]*\}/);
-  if (m) { try { return JSON.parse(m[0]); } catch { /* ignore */ } }
+/** Tolerant JSON extraction: strips code fences/BOM/smart quotes, takes the first balanced {...}, removes trailing commas. */
+export function parseJson(text) {
+  if (typeof text !== 'string') return null;
+  let t = text.replace(/^﻿/, '').replace(/[“”]/g, '"').replace(/[‘’]/g, "'").trim();
+  t = t.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
+  const attempt = (x) => { try { const v = JSON.parse(x); return v && typeof v === 'object' && !Array.isArray(v) ? v : null; } catch { return null; } };
+  const direct = attempt(t) ?? attempt(t.replace(/,\s*([}\]])/g, '$1'));
+  if (direct) return direct;
+  const start = t.indexOf('{');
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < t.length; i++) {                      // first balanced object, respecting strings
+    const ch = t[i];
+    if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true; else if (ch === '{') depth++; else if (ch === '}' && --depth === 0) {
+      const chunk = t.slice(start, i + 1);
+      return attempt(chunk) ?? attempt(chunk.replace(/,\s*([}\]])/g, '$1'));
+    }
+  }
   return null;
 }
 
+const isTransient = (e) => /-> (408|425|429|500|502|503|504)/.test(e.message) || e.name === 'TimeoutError' || e.name === 'AbortError' || /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket|network/i.test(e.message);
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Call the model chain until one returns valid JSON. A busy/slow/garbled model never ends the attempt: every Gemini model is tried (with one short retry for
+ * transient errors), then OpenRouter (retrying unparseable output with a stricter instruction), and the whole chain is run twice with a pause in between.
+ */
 export async function llmJson(prompt) {
   const providers = [];
   if (gemini) for (const m of config.models.gemini) providers.push([`gemini:${m}`, (p) => callGemini(p, m)]);
   if (openrouter) providers.push(['openrouter', callOpenRouter]);
-  for (const [name, fn] of providers) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const out = parseJson(await fn(prompt));
-        if (out) return { json: out, provider: name };
-        warn(`${name} returned unparseable JSON`);
-      } catch (e) {
-        const transient = /-> (429|500|502|503|504)/.test(e.message) || e.name === 'TimeoutError';
-        if (name.startsWith('gemini') && transient) { warn(`${name} busy, trying next model`); break; }
-        warn(`LLM call failed (${name}, attempt ${attempt + 1}):`, e.message.replace(/\s+/g, ' ').slice(0, 160));
-        if (transient && attempt < 2) { await new Promise((r) => setTimeout(r, 2000 * (attempt + 1))); continue; }
+  const strict = `${prompt}
+
+IMPORTANT: respond with ONE valid JSON object only: no markdown, no commentary, no trailing commas.`;
+  for (let pass = 0; pass < 2; pass++) {
+    if (pass > 0) await sleepMs(5000);
+    for (const [name, fn] of providers) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const out = parseJson(await fn(attempt === 0 ? prompt : strict));
+          if (out) return { json: out, provider: name };
+          warn(`${name} returned unparseable JSON${attempt === 0 ? ', retrying with a stricter instruction' : ''}`);
+        } catch (e) {
+          if (isTransient(e)) { warn(`${name} busy/slow (${e.message.replace(/\s+/g, ' ').slice(0, 80)})${attempt === 0 ? ', retrying once' : ', trying the next model'}`); if (attempt === 0) await sleepMs(1500); continue; }
+          warn(`LLM call failed (${name}):`, e.message.replace(/\s+/g, ' ').slice(0, 160));
+          break;                                                  // a hard error (bad key, bad request) will not fix itself on retry
+        }
       }
-      break;
     }
   }
   return null;
@@ -110,22 +135,43 @@ ${lessonsBlock(lessons)}
 Return JSON with exactly these keys:
 {"direction":"bullish"|"neutral"|"bearish","confidence":0-100,"target_price":number,"stop_price":number,"timeframe_hours":number,"supporting_sources":[...],"conflicting_sources":[...],"evidence_summary":"2-4 sentences, probabilistic wording","key_risks":"1-2 sentences"}`;
 
-  const out = await llmJson(prompt);
-  if (!out) return null;
-  const j = out.json;
-  const direction = ['bullish', 'neutral', 'bearish'].includes(j.direction) ? j.direction : null;
-  const confidence = num(j.confidence), target = num(j.target_price), stop = num(j.stop_price);
-  if (!direction || confidence == null || (direction === 'bullish' && (target == null || stop == null))) {
-    warn(`invalid LLM signal for ${ctx.symbol}`);
-    return null;
+  // A formatting slip must not cost a valid setup: validate (leniently), and if the answer is unusable ask once more, saying what was wrong.
+  let problem = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const out = await llmJson(attempt === 0 ? prompt : `${prompt}\n\nYour previous answer was rejected: ${problem}. Return the corrected JSON object only.`);
+    if (!out) return null;                                       // every model failed or timed out: the caller retries this coin later instead of rejecting it
+    const v = validateSignal(out.json, ctx.price);
+    if (v.ok) return { provider: out.provider, ...v.signal };
+    problem = v.problem;
+    warn(`invalid LLM signal for ${ctx.symbol} (${problem})${attempt === 0 ? ', asking once more' : ''}`);
   }
-  const valid = new Set(['exchange_technicals', 'derivatives', 'macro_gov', 'news_onchain', 'smart_money']);
-  const clean = (a) => [...new Set((Array.isArray(a) ? a : []).filter((x) => valid.has(x)))];
+  return null;
+}
+
+const SIGNAL_SOURCES = new Set(['exchange_technicals', 'derivatives', 'macro_gov', 'news_onchain', 'smart_money']);
+const numLoose = (v) => { if (typeof v === 'string') v = v.replace(/[%$,\s]/g, ''); const n = Number(v); return v !== '' && v != null && Number.isFinite(n) ? n : null; };
+
+/** Normalise and check a model answer. Accepts numeric strings, any-case direction, 0-1 confidence; requires stop < price < target for a bullish call. */
+export function validateSignal(j, price) {
+  if (!j || typeof j !== 'object') return { ok: false, problem: 'not a JSON object' };
+  const direction = String(j.direction ?? '').trim().toLowerCase();
+  if (!['bullish', 'neutral', 'bearish'].includes(direction)) return { ok: false, problem: `direction must be "bullish", "neutral" or "bearish" (got ${JSON.stringify(j.direction)})` };
+  let confidence = numLoose(j.confidence);
+  if (confidence == null) return { ok: false, problem: 'confidence must be a number from 0 to 100' };
+  if (confidence > 0 && confidence <= 1 && !Number.isInteger(confidence)) confidence *= 100;   // 0.85 -> 85
+  const target = numLoose(j.target_price), stop = numLoose(j.stop_price);
+  if (direction === 'bullish') {
+    if (target == null || stop == null) return { ok: false, problem: 'a bullish signal needs numeric target_price and stop_price' };
+    if (price > 0 && !(stop < price && price < target)) return { ok: false, problem: `for a bullish signal stop_price (${stop}) < price (${price}) < target_price (${target}) must hold` };
+  }
+  const clean = (a) => [...new Set((Array.isArray(a) ? a : []).filter((x) => SIGNAL_SOURCES.has(x)))];
   return {
-    provider: out.provider, direction, confidence: Math.max(0, Math.min(100, confidence)),
-    target, stop, timeframeHours: num(j.timeframe_hours),
-    supporting: clean(j.supporting_sources), conflicting: clean(j.conflicting_sources),
-    evidenceSummary: String(j.evidence_summary ?? '').slice(0, 1200), keyRisks: String(j.key_risks ?? '').slice(0, 600),
+    ok: true,
+    signal: {
+      direction, confidence: Math.max(0, Math.min(100, confidence)), target, stop, timeframeHours: numLoose(j.timeframe_hours),
+      supporting: clean(j.supporting_sources), conflicting: clean(j.conflicting_sources),
+      evidenceSummary: String(j.evidence_summary ?? '').slice(0, 1200), keyRisks: String(j.key_risks ?? '').slice(0, 600),
+    },
   };
 }
 

@@ -288,13 +288,13 @@ const rowActivity = (cs) => { const a = activity(cs); return { chg1h: a.h1, chg2
 async function evaluateCoin(cs, trigger, ctxSources, lessons, stats) {
   if (cs.evaluating) return;
   cs.evaluating = true;
-  try { await evaluateCoinInner(cs, trigger, ctxSources, lessons, stats); } finally { cs.evaluating = false; }
+  try { return await evaluateCoinInner(cs, trigger, ctxSources, lessons, stats); } finally { cs.evaluating = false; }
 }
 
 async function evaluateCoinInner(cs, trigger, ctxSources, lessons, stats) {
   const product = cs.coin.product;
-  const fp = await feed.freshPrice(product, R.staleMs);
-  if (fp.price == null) { await recordSkipped(cs, `price stream not verified fresh (age ${Math.round(fp.ageMs / 1000)}s): data unreliable`, { evidence: { trigger } }); return; }
+  const fp = await feed.freshPrice(product, R.evalStaleMs);     // evaluation tolerates 30s; the execution price is re-verified at 10s right before any entry (tryEnter)
+  if (fp.price == null) { await recordSkipped(cs, `price stream not verified fresh (age ${Math.round(fp.ageMs / 1000)}s > ${R.evalStaleMs / 1000}s): data unreliable`, { evidence: { trigger } }); return; }
   if (!cs.partialScore || cs.partialScore.total < 30) { await recordSkipped(cs, `technical + volume too weak (${cs.partialScore ? cs.partialScore.total.toFixed(1) : 'n/a'}/50): confluence cannot reach ${R.minConfluence}`, { evidence: { trigger } }); return; }
 
   // Smart money = derivatives positioning (funding / open interest) + what our >=75%-win-rate tracked traders hold in this coin right now.
@@ -329,7 +329,7 @@ async function evaluateCoinInner(cs, trigger, ctxSources, lessons, stats) {
     smartMoney: sm ? { trackedTradersLong: sm.longs, trackedTradersShort: sm.shorts, detail: sm.traders.map((t) => ({ side: t.side, winRate: +t.winRate.toFixed(2) })) } : 'no tracked trader currently holds this coin',
     provenance,
   }, lessons.map((l) => ({ outcome: l.outcome, symbol: l.symbol, lesson: l.lesson })));
-  if (!sig) { await recordSkipped(cs, 'Research Brain returned no valid signal', { evidence: { trigger } }); return; }
+  if (!sig) { await recordSkipped(cs, 'Research Brain unavailable or returned no usable signal after retries: the setup was NOT judged, will be retried', { evidence: { trigger } }); return 'ai_failed'; }
   cs.lastLlmAt = Date.now();
 
   const mult = historyMultiplier(cs.symbol);
@@ -395,9 +395,19 @@ async function evaluateCandidates(ctxSources) {
 
   const lessons = state.reflections.slice(0, 5);
   const stats = patternStats();
+  const aiFailed = [];
   for (const { cs, trigger } of lineup) {
     if (state.positions.size + state.pending.size >= R.maxOpenPositions) break;
-    await evaluateCoin(cs, trigger, ctxSources, lessons, stats);
+    if (await evaluateCoin(cs, trigger, ctxSources, lessons, stats) === 'ai_failed') aiFailed.push({ cs, trigger });
+  }
+  // An AI outage or formatting failure must not reject an otherwise valid setup: give those coins one more try after the models have had time to recover.
+  if (aiFailed.length) {
+    logDecision('info', '*', `${aiFailed.length} setup(s) could not be judged because the AI failed (${aiFailed.map((x) => x.cs.symbol).join(', ')}): retrying`);
+    await sleep(15_000);
+    for (const { cs, trigger } of aiFailed) {
+      if (state.positions.size + state.pending.size >= R.maxOpenPositions) break;
+      await evaluateCoin(cs, trigger, ctxSources, lessons, stats);
+    }
   }
 }
 
@@ -463,6 +473,10 @@ async function tryEnter(p, confirmation) {
     let btc = state.btc;
     try { btc = riskLib.btcRegime(snapshot(await fetchCandles('BTC-USD', 3600))); state.btc = { ...btc, at: Date.now() }; } catch { /* keep scan regime */ }
     const live = fp.price ?? p.refPrice;
+    // Execution-price validation: a price that is stale (>10s) or has moved materially since the setup was confirmed is never traded.
+    const execReasons = [];
+    if (fp.price == null) execReasons.push(`execution price stale (last trade ${Number.isFinite(fp.ageMs) ? Math.round(fp.ageMs / 1000) + 's' : 'unknown'} ago, max ${R.staleMs / 1000}s)`);
+    else if (confirmation?.c > 0 && Math.abs(fp.price / confirmation.c - 1) > R.maxEntryDriftPct) execReasons.push(`execution price ${fp.price} is ${(Math.abs(fp.price / confirmation.c - 1) * 100).toFixed(2)}% away from the confirmed price ${confirmation.c} (max ${R.maxEntryDriftPct * 100}%)`);
     const shaped = riskLib.shapeTrade(live, p.sig.stop, p.sig.target, { symbol: p.symbol, rank: cs?.coin?.rank ?? 100 });
     const reasons = riskLib.entryFilters({
       signal: p.sig, entry: live, shaped, score: p.conf.total, btc, portfolio: state.portfolio,
@@ -470,6 +484,7 @@ async function tryEnter(p, confirmation) {
     });
     if (live <= shaped.stop) reasons.push('price already at/below the stop level');
     const rj = rejectFor(cs); if (rj) reasons.push(rj.text);
+    reasons.push(...execReasons);
     if (reasons.length) {
       await db.updateSignal(p.id, { status: 'skipped', skip_reason: reasons.join(' | '), rr: shaped.rr });
       if (cs?.signal) cs.signal.status = 'skipped';
