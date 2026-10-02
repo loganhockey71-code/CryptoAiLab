@@ -27,6 +27,9 @@ export const config = {
     gemini: env('GEMINI_API_KEY'),
     openrouter: env('OPENROUTER_API_KEY'),
     nvidia: env('NVIDIA_API_KEY'),
+    groq: env('GROQ_API_KEY'),                 // Groq free tier (OpenAI-compatible)
+    kilo: env('KILO_API_KEY'),                 // Kilo gateway: only its FREE models are ever used
+    aiGateway: env('AI_GATEWAY_API_KEY'),      // Vercel AI Gateway: only its zero-price models are ever used by the Research Brain
     // Optional: ANY OpenAI-compatible endpoint (e.g. a self-hosted FreeLLMAPI proxy at http://localhost:3001/v1). Needs both the URL and the key.
     customUrl: env('CUSTOM_LLM_BASE_URL'),
     custom: env('CUSTOM_LLM_API_KEY'),
@@ -46,6 +49,8 @@ export const config = {
     openrouter: env('OPENROUTER_MODEL') || 'google/gemini-3.5-flash',
     // NVIDIA NIM (OpenAI-compatible, https://integrate.api.nvidia.com): the PRIMARY Research Brain model. Gemini and OpenRouter stay as fallbacks.
     custom: env('CUSTOM_LLM_MODEL') || 'auto',
+    // Groq models, tried in this order (each has its own free daily/minute limits). Override with GROQ_MODELS=a,b,c
+    groq: (env('GROQ_MODELS') || 'openai/gpt-oss-120b,llama-3.3-70b-versatile,qwen/qwen3-32b,openai/gpt-oss-20b').split(',').map((x) => x.trim()).filter(Boolean),
     nvidia: env('NVIDIA_MODEL') || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
   },
   // Deterministic risk constants. The self-learning system must never write to these.

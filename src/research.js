@@ -1,9 +1,9 @@
 // THE RESEARCH BRAIN: asynchronous LLM that outputs structured JSON only. It never places orders.
 import { config, warn } from './config.js';
 
-const { gemini, openrouter, nvidia, custom, customUrl } = config.keys;
+const { gemini, openrouter, nvidia, custom, customUrl, groq, kilo, aiGateway } = config.keys;
 /** A key is configured. This says nothing about whether the providers still have quota: see llmUsable(). */
-export const llmAvailable = () => !!(nvidia || (custom && customUrl) || gemini || openrouter);
+export const llmAvailable = () => !!(nvidia || (custom && customUrl) || groq || gemini || openrouter || kilo || aiGateway);
 
 /** HTTP error from a provider, keeping the status, body and Retry-After so the failure can be classified (message format unchanged). */
 class ApiError extends Error {
@@ -51,6 +51,19 @@ async function callCustom(prompt) {
   if (!res.ok) throw new ApiError('custom', res.status, await res.text(), res.headers.get('retry-after'));
   const j = await res.json();
   const m = j.choices?.[0]?.message ?? {};
+  return String(m.content ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim() || String(m.reasoning_content ?? '');
+}
+
+/** Generic OpenAI-compatible chat call. `name` is only used in the error message so failures are attributed to the right provider. */
+async function callCompat(name, base, key, model, prompt) {
+  const res = await fetch(`${base}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.2, max_tokens: 4096, stream: false }),
+    signal: AbortSignal.timeout(90_000),
+  });
+  if (!res.ok) throw new ApiError(name, res.status, await res.text(), res.headers.get('retry-after'));
+  const m = (await res.json()).choices?.[0]?.message ?? {};
   return String(m.content ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim() || String(m.reasoning_content ?? '');
 }
 
@@ -110,12 +123,14 @@ const L = config.llm;
 const isFreeId = (id) => /:free$/.test(id) || id === 'openrouter/free';
 const sizeB = (id) => { const m = id.match(/(\d+(?:\.\d+)?)b(?![a-z])/i); return m ? Number(m[1]) : null; };
 /** From OpenRouter's /models payload: free, text-in/text-out, >= 64k context, not a safety classifier, not tiny (< 7B); the preferred model first, then biggest, then newest. */
-export function pickFreeModels(list, preferred) {
-  const ok = list.filter((m) => isFreeId(m.id) && m.id !== 'openrouter/free'
-    && (m.architecture?.output_modalities ?? ['text']).join() === 'text' && (m.architecture?.input_modalities ?? ['text']).includes('text')
-    && (m.context_length ?? 0) >= 64_000 && !/safety|guard|embed|rerank|moderation/i.test(m.id) && !(sizeB(m.id) != null && sizeB(m.id) < 7));
+export function pickByPredicate(list, free) {
+  const ok = list.filter((m) => free(m) && (m.architecture?.output_modalities ?? m.modalities?.output ?? ['text']).join() === 'text' && (m.architecture?.input_modalities ?? m.modalities?.input ?? ['text']).includes('text')
+    && (m.context_length ?? m.context_window ?? 0) >= 64_000 && (m.type ?? 'language') === 'language' && !/safety|guard|embed|rerank|moderation|lyria/i.test(m.id) && !(sizeB(m.id) != null && sizeB(m.id) < 7));
   ok.sort((a, b) => (sizeB(b.id) ?? 0) - (sizeB(a.id) ?? 0) || (b.created ?? 0) - (a.created ?? 0));
-  const ids = ok.map((m) => m.id);
+  return ok.map((m) => m.id);
+}
+export function pickFreeModels(list, preferred) {
+  const ids = pickByPredicate(list, (m) => isFreeId(m.id) && m.id !== 'openrouter/free');
   const first = preferred && isFreeId(preferred) && preferred !== 'openrouter/free' ? [preferred] : [];
   return [...new Set([...first, ...ids, 'openrouter/free'])];          // the router goes last: it picks some free model itself
 }
@@ -128,14 +143,25 @@ async function refreshOpenRouterModels() {
     warn(`OpenRouter free models: ${orModels.length} in the chain (${orModels.slice(0, 4).join(', ')}, ...)`);
   } catch (e) { warn('OpenRouter model list unavailable, keeping the previous list:', e.message); }
 }
+const zeroPrice = (m) => Number(m.pricing?.input ?? m.pricing?.prompt) === 0 && Number(m.pricing?.output ?? m.pricing?.completion) === 0;
+let kiloModels = [], vercelModels = [];
+async function refreshGatewayLists() {
+  const get = async (url) => { const r = await fetch(url, { signal: AbortSignal.timeout(20_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); return (await r.json()).data ?? []; };
+  if (kilo) { try { kiloModels = pickByPredicate(await get('https://api.kilo.ai/api/gateway/models'), (m) => m.isFree === true && zeroPrice(m) && m.id !== 'openrouter/free' && !/^kilo-auto|^stealth\//.test(m.id)); warn(`Kilo free models: ${kiloModels.length}`); } catch (e) { warn('Kilo model list unavailable:', e.message); } }
+  if (aiGateway) { try { vercelModels = pickByPredicate(await get('https://ai-gateway.vercel.sh/v1/models'), zeroPrice); warn(`Vercel AI Gateway zero-price models: ${vercelModels.length}`); } catch (e) { warn('Vercel AI Gateway model list unavailable:', e.message); } }
+}
 if (openrouter) { refreshOpenRouterModels(); setInterval(refreshOpenRouterModels, L.openrouterRefreshMs).unref(); }
+if (kilo || aiGateway) { refreshGatewayLists(); setInterval(refreshGatewayLists, L.openrouterRefreshMs).unref(); }
 if (openrouter && !isFreeId(config.models.openrouter)) warn(`OPENROUTER_MODEL=${config.models.openrouter} is not a free model and will NOT be used (free ":free" models only).`);
 /** The model chain, in order: NVIDIA NIM (primary), an optional custom OpenAI-compatible endpoint, every Gemini model (each has its OWN daily quota), then every free OpenRouter model. */
 const chain = () => [
   ...(nvidia ? [['nvidia', callNvidia]] : []),
   ...(custom && customUrl ? [['custom', callCustom]] : []),
+  ...(groq ? config.models.groq.map((id) => [`groq:${id}`, (p) => callCompat('groq', 'https://api.groq.com/openai/v1', groq, id, p)]) : []),
   ...(gemini ? config.models.gemini.map((m) => [`gemini:${m}`, (p) => callGemini(p, m)]) : []),
   ...(openrouter ? orModels.map((id) => [`openrouter:${id}`, (p) => callOpenRouter(p, id)]) : []),
+  ...(kilo ? kiloModels.map((id) => [`kilo:${id}`, (p) => callCompat('kilo', 'https://api.kilo.ai/api/gateway', kilo, id, p)]) : []),
+  ...(aiGateway ? vercelModels.map((id) => [`vercel:${id}`, (p) => callCompat('vercel', 'https://ai-gateway.vercel.sh/v1', aiGateway, id, p)]) : []),
 ];
 
 // ---- Provider health. An error that cannot succeed until a reset (daily quota, per-minute limit, bad key) takes THAT model out of the chain until the reset time
@@ -160,7 +186,7 @@ function resetMsFromError(e) {
     const reset = Number(j.error?.metadata?.headers?.['X-RateLimit-Reset']);
     if (reset > Date.now()) return reset - Date.now();
   } catch { /* not JSON */ }
-  const m = body.match(/retry in\s+(?:(\d+(?:\.\d+)?)h)?\s*(?:(\d+(?:\.\d+)?)m(?!s))?\s*(?:(\d+(?:\.\d+)?)s)?/i);
+  const m = body.match(/(?:retry|try again) in\s+(?:(\d+(?:\.\d+)?)h)?\s*(?:(\d+(?:\.\d+)?)m(?!s))?\s*(?:(\d+(?:\.\d+)?)s)?/i);
   if (m && (m[1] || m[2] || m[3])) return ((+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0)) * 1000;
   const ra = Number(e.retryAfter);
   return ra > 0 ? ra * 1000 : null;
@@ -174,6 +200,7 @@ function resetMsFromError(e) {
 export function classifyUnrecoverable(e) {
   const now = Date.now(), text = `${e.body ?? ''} ${e.message}`;
   if (e.status === 401 || e.status === 403) return { kind: 'auth', until: now + L.authDownMs };
+  if (/request too large|reduce your message size|maximum context length|context length exceeded/i.test(text) && [400, 413, 429].includes(e.status)) return { kind: 'toolarge', until: now + 6 * 3600_000 };   // this model can never take our prompt: stop asking it
   if (e.status === 404) return { kind: 'unavailable', until: now + 6 * 3600_000 };   // model retired / no provider serves it right now
   if (e.status === 402) return { kind: 'quota', until: now + L.quotaFallbackMs };   // payment required / credits exhausted: stays out until re-probed
   if (e.status !== 429) return null;
@@ -186,7 +213,8 @@ export function classifyUnrecoverable(e) {
 function markDown(name, c, e) {
   const h = hs(name);
   h.downUntil = c.until; h.kind = c.kind; h.reason = e.message.replace(/\s+/g, ' ').slice(0, 140); h.wasted++; h.outages++;
-  if (c.kind === 'quota' && name.startsWith('openrouter:')) for (const [n] of chain()) if (n.startsWith('openrouter:') && n !== name) Object.assign(hs(n), { downUntil: c.until, kind: 'quota', reason: h.reason });   // account-wide daily cap: every free model is out
+  const group = name.split(':')[0];
+  if (c.kind === 'quota' && ['openrouter', 'kilo', 'vercel'].includes(group)) for (const [n] of chain()) if (n.startsWith(`${group}:`) && n !== name) Object.assign(hs(n), { downUntil: c.until, kind: 'quota', reason: h.reason });   // account-wide cap: every model behind that key is out
   const mins = Math.round((c.until - Date.now()) / 60_000);
   warn(`AI provider ${name} unavailable: ${c.kind} limit (HTTP ${e.status}), will not be retried until ${new Date(c.until).toISOString()} (${mins >= 90 ? (mins / 60).toFixed(1) + 'h' : mins + 'm'}); wasted attempts so far: ${h.wasted}, calls avoided: ${h.avoided}`);
   llmStats.lastError = `${name}: ${c.kind} limit until ${new Date(c.until).toISOString().slice(0, 16)}Z`; llmStats.lastErrorAt = Date.now();
