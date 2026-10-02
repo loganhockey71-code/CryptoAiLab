@@ -27,6 +27,9 @@ export const config = {
     gemini: env('GEMINI_API_KEY'),
     openrouter: env('OPENROUTER_API_KEY'),
     nvidia: env('NVIDIA_API_KEY'),
+    // Optional: ANY OpenAI-compatible endpoint (e.g. a self-hosted FreeLLMAPI proxy at http://localhost:3001/v1). Needs both the URL and the key.
+    customUrl: env('CUSTOM_LLM_BASE_URL'),
+    custom: env('CUSTOM_LLM_API_KEY'),
     coingecko: env('COINGECKO_API_KEY'),
     coinmarketcap: env('COINMARKETCAP_API_KEY'),
     coinglass: env('COINGLASS_API_KEY'),
@@ -42,6 +45,7 @@ export const config = {
     gemini: ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-flash-latest'],
     openrouter: env('OPENROUTER_MODEL') || 'google/gemini-3.5-flash',
     // NVIDIA NIM (OpenAI-compatible, https://integrate.api.nvidia.com): the PRIMARY Research Brain model. Gemini and OpenRouter stay as fallbacks.
+    custom: env('CUSTOM_LLM_MODEL') || 'auto',
     nvidia: env('NVIDIA_MODEL') || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
   },
   // Deterministic risk constants. The self-learning system must never write to these.

@@ -1,9 +1,9 @@
 // THE RESEARCH BRAIN: asynchronous LLM that outputs structured JSON only. It never places orders.
 import { config, warn } from './config.js';
 
-const { gemini, openrouter, nvidia } = config.keys;
+const { gemini, openrouter, nvidia, custom, customUrl } = config.keys;
 /** A key is configured. This says nothing about whether the providers still have quota: see llmUsable(). */
-export const llmAvailable = () => !!(nvidia || gemini || openrouter);
+export const llmAvailable = () => !!(nvidia || (custom && customUrl) || gemini || openrouter);
 
 /** HTTP error from a provider, keeping the status, body and Retry-After so the failure can be classified (message format unchanged). */
 class ApiError extends Error {
@@ -38,6 +38,20 @@ async function callNvidia(prompt) {
   const m = j.choices?.[0]?.message ?? {};
   const answer = String(m.content ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
   return answer || String(m.reasoning_content ?? m.reasoning ?? '');       // last resort: some deployments put the whole reply in the reasoning field
+}
+
+/** Any OpenAI-compatible endpoint you configure (CUSTOM_LLM_BASE_URL + CUSTOM_LLM_API_KEY [+ CUSTOM_LLM_MODEL, default "auto"]), e.g. a self-hosted router/proxy. */
+async function callCustom(prompt) {
+  const res = await fetch(`${customUrl.replace(/\/+$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${custom}` },
+    body: JSON.stringify({ model: config.models.custom, messages: [{ role: 'user', content: prompt }], temperature: 0.2, max_tokens: 6000, stream: false }),
+    signal: AbortSignal.timeout(90_000),
+  });
+  if (!res.ok) throw new ApiError('custom', res.status, await res.text(), res.headers.get('retry-after'));
+  const j = await res.json();
+  const m = j.choices?.[0]?.message ?? {};
+  return String(m.content ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim() || String(m.reasoning_content ?? '');
 }
 
 async function callOpenRouter(prompt) {
@@ -88,9 +102,10 @@ const isTransient = (e) => /-> (408|425|429|500|502|503|504)/.test(e.message) ||
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const L = config.llm;
-/** The model chain, in order: NVIDIA NIM (primary), every Gemini model (each has its OWN daily quota), then OpenRouter. */
+/** The model chain, in order: NVIDIA NIM (primary), an optional custom OpenAI-compatible endpoint, every Gemini model (each has its OWN daily quota), then OpenRouter. */
 const chain = () => [
   ...(nvidia ? [['nvidia', callNvidia]] : []),
+  ...(custom && customUrl ? [['custom', callCustom]] : []),
   ...(gemini ? config.models.gemini.map((m) => [`gemini:${m}`, (p) => callGemini(p, m)]) : []),
   ...(openrouter ? [['openrouter', callOpenRouter]] : []),
 ];
