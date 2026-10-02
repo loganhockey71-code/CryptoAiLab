@@ -129,7 +129,8 @@ export const config = {
   // AI provider handling. An error that cannot succeed until a reset is not retried: that model is skipped until then (the values below are only fallbacks when the provider gives no reset time).
   // pressureMaxSignals: once any model has hit a DAILY quota, only this many of the best candidates are sent to the AI per scan, so what is left is reserved for them.
   // maxAttemptsPerSignal: HTTP calls one signal may make for TRANSIENT trouble (timeouts, 5xx, unparseable output) = the first call + 1 retry in total, across every model.
-  llm: Object.freeze({ maxAttemptsPerSignal: 2, authDownMs: 30 * 60_000, quotaFallbackMs: 2 * 3600_000, rateFallbackMs: 60_000, maxDownMs: 26 * 3600_000, pressureMaxSignals: 5 }),
+  // maxDiscoveriesPerSignal: models found unavailable (quota / rate limit / gone) while serving ONE signal; a safety stop so a bad day cannot burn calls walking a long chain.
+  llm: Object.freeze({ maxDiscoveriesPerSignal: 3, openrouterRefreshMs: 6 * 3600_000, maxAttemptsPerSignal: 2, authDownMs: 30 * 60_000, quotaFallbackMs: 2 * 3600_000, rateFallbackMs: 60_000, maxDownMs: 26 * 3600_000, pressureMaxSignals: 5 }),
   // Trending / unusually-active detection. It only decides what gets researched FIRST; it never lowers a requirement.
   movers: Object.freeze({ chg1h: 0.04, chg4h: 0.08, chg24h: 0.15, rvol: 2.5, maxMoversPerScan: 3, fastTrigger1h: 0.08, fastCheckMs: 60_000, fastCooldownMs: 15 * 60_000 }),
   scanIntervalMs: 5 * 60_000,

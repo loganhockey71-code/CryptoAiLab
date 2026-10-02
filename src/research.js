@@ -54,12 +54,12 @@ async function callCustom(prompt) {
   return String(m.content ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim() || String(m.reasoning_content ?? '');
 }
 
-async function callOpenRouter(prompt) {
+async function callOpenRouter(prompt, model) {
   const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${openrouter}` },
     body: JSON.stringify({
-      model: config.models.openrouter,
+      model,
       messages: [{ role: 'user', content: prompt }],
       response_format: { type: 'json_object' },
       temperature: 0.2,
@@ -69,7 +69,8 @@ async function callOpenRouter(prompt) {
   });
   if (!res.ok) throw new ApiError('openrouter', res.status, await res.text(), res.headers.get('retry-after'));
   const j = await res.json();
-  return j.choices?.[0]?.message?.content ?? '';
+  const m = j.choices?.[0]?.message ?? {};
+  return String(m.content ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 }
 
 /** Tolerant JSON extraction: strips code fences/BOM/smart quotes, takes the first balanced {...}, removes trailing commas. */
@@ -102,12 +103,39 @@ const isTransient = (e) => /-> (408|425|429|500|502|503|504)/.test(e.message) ||
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const L = config.llm;
-/** The model chain, in order: NVIDIA NIM (primary), an optional custom OpenAI-compatible endpoint, every Gemini model (each has its OWN daily quota), then OpenRouter. */
+
+// ---- OpenRouter: every FREE text model, discovered from OpenRouter's public model list (no key needed) and refreshed every few hours. Free = id ends in ":free" (or the
+// "openrouter/free" router). A paid model id is never used, even if OPENROUTER_MODEL names one. The daily "free-models-per-day" cap belongs to the ACCOUNT, so when it is
+// hit every openrouter:* entry goes down together (see markDown); per-model upstream rate limits only take that one model out.
+const isFreeId = (id) => /:free$/.test(id) || id === 'openrouter/free';
+const sizeB = (id) => { const m = id.match(/(\d+(?:\.\d+)?)b(?![a-z])/i); return m ? Number(m[1]) : null; };
+/** From OpenRouter's /models payload: free, text-in/text-out, >= 64k context, not a safety classifier, not tiny (< 7B); the preferred model first, then biggest, then newest. */
+export function pickFreeModels(list, preferred) {
+  const ok = list.filter((m) => isFreeId(m.id) && m.id !== 'openrouter/free'
+    && (m.architecture?.output_modalities ?? ['text']).join() === 'text' && (m.architecture?.input_modalities ?? ['text']).includes('text')
+    && (m.context_length ?? 0) >= 64_000 && !/safety|guard|embed|rerank|moderation/i.test(m.id) && !(sizeB(m.id) != null && sizeB(m.id) < 7));
+  ok.sort((a, b) => (sizeB(b.id) ?? 0) - (sizeB(a.id) ?? 0) || (b.created ?? 0) - (a.created ?? 0));
+  const ids = ok.map((m) => m.id);
+  const first = preferred && isFreeId(preferred) && preferred !== 'openrouter/free' ? [preferred] : [];
+  return [...new Set([...first, ...ids, 'openrouter/free'])];          // the router goes last: it picks some free model itself
+}
+let orModels = openrouter ? pickFreeModels([], config.models.openrouter) : [];
+async function refreshOpenRouterModels() {
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/models', { signal: AbortSignal.timeout(20_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    orModels = pickFreeModels((await res.json()).data ?? [], config.models.openrouter);
+    warn(`OpenRouter free models: ${orModels.length} in the chain (${orModels.slice(0, 4).join(', ')}, ...)`);
+  } catch (e) { warn('OpenRouter model list unavailable, keeping the previous list:', e.message); }
+}
+if (openrouter) { refreshOpenRouterModels(); setInterval(refreshOpenRouterModels, L.openrouterRefreshMs).unref(); }
+if (openrouter && !isFreeId(config.models.openrouter)) warn(`OPENROUTER_MODEL=${config.models.openrouter} is not a free model and will NOT be used (free ":free" models only).`);
+/** The model chain, in order: NVIDIA NIM (primary), an optional custom OpenAI-compatible endpoint, every Gemini model (each has its OWN daily quota), then every free OpenRouter model. */
 const chain = () => [
   ...(nvidia ? [['nvidia', callNvidia]] : []),
   ...(custom && customUrl ? [['custom', callCustom]] : []),
   ...(gemini ? config.models.gemini.map((m) => [`gemini:${m}`, (p) => callGemini(p, m)]) : []),
-  ...(openrouter ? [['openrouter', callOpenRouter]] : []),
+  ...(openrouter ? orModels.map((id) => [`openrouter:${id}`, (p) => callOpenRouter(p, id)]) : []),
 ];
 
 // ---- Provider health. An error that cannot succeed until a reset (daily quota, per-minute limit, bad key) takes THAT model out of the chain until the reset time
@@ -146,6 +174,7 @@ function resetMsFromError(e) {
 export function classifyUnrecoverable(e) {
   const now = Date.now(), text = `${e.body ?? ''} ${e.message}`;
   if (e.status === 401 || e.status === 403) return { kind: 'auth', until: now + L.authDownMs };
+  if (e.status === 404) return { kind: 'unavailable', until: now + 6 * 3600_000 };   // model retired / no provider serves it right now
   if (e.status === 402) return { kind: 'quota', until: now + L.quotaFallbackMs };   // payment required / credits exhausted: stays out until re-probed
   if (e.status !== 429) return null;
   const waitMs = resetMsFromError(e);
@@ -157,6 +186,7 @@ export function classifyUnrecoverable(e) {
 function markDown(name, c, e) {
   const h = hs(name);
   h.downUntil = c.until; h.kind = c.kind; h.reason = e.message.replace(/\s+/g, ' ').slice(0, 140); h.wasted++; h.outages++;
+  if (c.kind === 'quota' && name.startsWith('openrouter:')) for (const [n] of chain()) if (n.startsWith('openrouter:') && n !== name) Object.assign(hs(n), { downUntil: c.until, kind: 'quota', reason: h.reason });   // account-wide daily cap: every free model is out
   const mins = Math.round((c.until - Date.now()) / 60_000);
   warn(`AI provider ${name} unavailable: ${c.kind} limit (HTTP ${e.status}), will not be retried until ${new Date(c.until).toISOString()} (${mins >= 90 ? (mins / 60).toFixed(1) + 'h' : mins + 'm'}); wasted attempts so far: ${h.wasted}, calls avoided: ${h.avoided}`);
   llmStats.lastError = `${name}: ${c.kind} limit until ${new Date(c.until).toISOString().slice(0, 16)}Z`; llmStats.lastErrorAt = Date.now();
@@ -181,7 +211,7 @@ export const llmProviders = () => chain().map(([name]) => {
  * generateSignal's corrective re-ask. The retry goes to the next usable model, or the same one with a stricter instruction if it is the only one left.
  * Returns null when nothing usable answered; the caller degrades gracefully and the coin is looked at again on a later scan.
  */
-export async function llmJson(prompt, budget = { left: L.maxAttemptsPerSignal }) {
+export async function llmJson(prompt, budget = { left: L.maxAttemptsPerSignal, found: 0 }) {
   const providers = chain();
   const strict = `${prompt}
 
@@ -200,7 +230,7 @@ IMPORTANT: respond with ONE valid JSON object only: no markdown, no commentary, 
         stricter = true;
       } catch (e) {
         const c = classifyUnrecoverable(e);
-        if (c) { budget.left++; markDown(name, c, e); continue; }          // cannot succeed until the reset: refund the attempt, try the next model
+        if (c) { budget.left++; markDown(name, c, e); if (++budget.found >= L.maxDiscoveriesPerSignal) return null; continue; }          // cannot succeed until the reset: refund the attempt, try the next model
         if (isTransient(e)) { noteError('transient', `${name}: ${e.message.replace(/\s+/g, ' ').slice(0, 100)}`); warn(`${name} busy/slow (${e.message.replace(/\s+/g, ' ').slice(0, 80)}) (${budget.left} retr${budget.left === 1 ? 'y' : 'ies'} left for this signal)`); continue; }
         noteError('hard', `${name}: ${e.message.replace(/\s+/g, ' ').slice(0, 100)}`);
         warn(`LLM call failed (${name}):`, e.message.replace(/\s+/g, ' ').slice(0, 160));
@@ -258,7 +288,7 @@ Return JSON with exactly these keys:
   // A formatting slip must not cost a valid setup: validate (leniently), and if the answer is unusable ask once more, saying what was wrong.
   if (!llmUsable()) { llmStats.skippedUnavailable++; return null; }   // nothing can answer: do not count it as a failed signal
   let problem = null;
-  const budget = { left: L.maxAttemptsPerSignal };                 // ONE budget for this signal, shared with the corrective re-ask below
+  const budget = { left: L.maxAttemptsPerSignal, found: 0 };                 // ONE budget for this signal, shared with the corrective re-ask below
   llmStats.signals++;
   for (let attempt = 0; attempt < 2; attempt++) {
     const out = await llmJson(attempt === 0 ? prompt : `${prompt}\n\nYour previous answer was rejected: ${problem}. Return the corrected JSON object only.`, budget);
