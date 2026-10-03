@@ -78,7 +78,7 @@ export function record(d, now = Date.now(), kind = 'decision') {
   const last = [...journal.entries].reverse().find((e) => e.symbol === d.symbol && e.side === side && e.kind === kind && now - e.at < 55 * 60_000 && e.action === d.action);
   if (last && d.action !== 'BUY' && d.action !== 'SHORT') return last.id;     // one record per coin per hour per action: the outcome clock must not be flooded by repeats
   const e = {
-    id: `d${now.toString(36)}${(seq++).toString(36)}`, at: now, kind, side, mode: d.mode ?? 'normal', symbol: d.symbol, action: d.action, verdict: d.verdict, cls: d.cls, score: d.score, scores: d.scores, pUp: d.pUp, ev: d.ev, setup: d.setup?.name ?? null,
+    id: `d${now.toString(36)}${(seq++).toString(36)}`, at: now, kind, side, mode: d.mode ?? 'normal', xkind: d.exploration?.kind ?? null, symbol: d.symbol, action: d.action, verdict: d.verdict, cls: d.cls, score: d.score, scores: d.scores, pUp: d.pUp, ev: d.ev, setup: d.setup?.name ?? null,
     price: d.evidence?.price ?? d.entry, entry: plan.entry, stop: plan.stop, target: plan.target, rr: plan.rr, holdHours: plan.holdHours, targetR: d.targetR ?? null, realisticR: d.realisticR ?? null,
     chase: d.chase ? { score: d.chase.score, verdict: d.chase.verdict, moveAtr: d.chase.moveAtr, distLevelAtr: d.chase.distLevelAtr, expectedMoveUsed: d.chase.expectedMoveUsed, spikeSpent: d.chase.spikeSpent, stretched: d.chase.stretched } : null,
     relStrength: d.relStrength ?? null, factors: d.factors, vetoes: d.vetoes.map((v) => v.code), hard: d.vetoes.filter((v) => v.hard).map((v) => v.code), reasons: d.reasons.slice(0, 8), whyNow: d.why?.now ?? null,
@@ -147,7 +147,7 @@ export async function resolveOutcomes(fetch15m, now = Date.now(), budget = 6) {
 }
 
 /** A real paper trade opened from decision `id`: its outcome is the real trade's, not a counterfactual. */
-export function attachTrade(id, tradeId, mode = 'normal') { const e = journal.entries.find((x) => x.id === id); if (e) { e.tradeId = tradeId; e.mode = mode; journal.dirty = true; } }
+export function attachTrade(id, tradeId, mode = 'normal', xkind) { const e = journal.entries.find((x) => x.id === id); if (e) { e.tradeId = tradeId; e.mode = mode; if (xkind !== undefined) e.xkind = xkind; journal.dirty = true; } }
 export function closeTrade(tradeId, r) {
   const e = journal.entries.find((x) => x.tradeId === tradeId); if (!e) return null;
   const risk = e.entry && e.stop ? Math.abs(e.entry - e.stop) / e.entry + COST : null;
@@ -366,12 +366,16 @@ const stats = (rs) => {
  */
 export function explorationReport() {
   const X = B.explore, ts = resolvedAll().filter((e) => e.outcome.source === 'trade' && e.mode === 'exploration' && e.outcome.R != null);
+  const RT = 2 * (config.risk.feePct + config.risk.slippagePct);
+  const costRs = (rows) => { const v = rows.map((e) => (e.entry && e.stop ? RT / (Math.abs(e.entry - e.stop) / e.entry + RT) : null)).filter((x) => x != null); return v.length ? +(v.reduce((a, x) => a + x, 0) / v.length).toFixed(3) : null; };   // fees + slippage as a share of the dollars risked
+  const evOf = (rows) => { const v = rows.map((e) => e.ev).filter((x) => x != null); return v.length ? +(v.reduce((a, x) => a + x, 0) / v.length).toFixed(3) : null; };
   const stat = (rows) => {
     const n = rows.length; if (!n) return { n: 0 };
     const R = rows.map((e) => e.outcome.R), mean = R.reduce((a, x) => a + x, 0) / n, sd = n > 1 ? Math.sqrt(R.reduce((a, x) => a + (x - mean) ** 2, 0) / (n - 1)) : null, se = sd != null ? sd / Math.sqrt(n) : null;
     const gp = R.filter((x) => x > 0).reduce((a, x) => a + x, 0), gl = -R.filter((x) => x <= 0).reduce((a, x) => a + x, 0);
     return { n, winRate: +(R.filter((x) => x > 0).length / n).toFixed(2), avgR: +mean.toFixed(3), totalR: +R.reduce((a, x) => a + x, 0).toFixed(2), sd: sd != null ? +sd.toFixed(2) : null, lower95: se != null ? +(mean - 1.96 * se).toFixed(3) : null, upper95: se != null ? +(mean + 1.96 * se).toFixed(3) : null, profitFactor: gl > 0 ? +(gp / gl).toFixed(2) : null,
-      avgMfe: +(rows.reduce((a, e) => a + (e.outcome.mfe ?? 0), 0) / n).toFixed(4), avgMae: +(rows.reduce((a, e) => a + (e.outcome.mae ?? 0), 0) / n).toFixed(4), avgHours: +(rows.reduce((a, e) => a + (e.outcome.hoursHeld ?? 0), 0) / n).toFixed(1) };
+      avgMfe: +(rows.reduce((a, e) => a + (e.outcome.mfe ?? 0), 0) / n).toFixed(4), avgMae: +(rows.reduce((a, e) => a + (e.outcome.mae ?? 0), 0) / n).toFixed(4), avgHours: +(rows.reduce((a, e) => a + (e.outcome.hoursHeld ?? 0), 0) / n).toFixed(1),
+      avgCostR: costRs(rows), avgPredEV: evOf(rows), avgScore: +(rows.reduce((a, e) => a + (e.score ?? 0), 0) / n).toFixed(1) };
   };
   const all = stat(ts), n = ts.length;
   const buckets = [['1.50-1.75', 1.5, 1.75], ['1.75-2.00', 1.75, 2.0], ['2.00-2.25', 2.0, 2.25], ['2.25-2.50', 2.25, 2.5]].map(([label, lo, hi]) => { const rows = ts.filter((e) => (e.execRR ?? e.rr) >= lo && (e.execRR ?? e.rr) < hi); return { label, ...stat(rows), positive: rows.length >= X.bucketMin && stat(rows).lower95 > 0 }; });
@@ -381,7 +385,11 @@ export function explorationReport() {
   else if (all.upper95 < 0) { verdict = n >= X.decisiveTrades ? 'negative (decisive)' : 'negative (preliminary)'; text = `average ${all.avgR}R, 95% interval ${all.lower95}R to ${all.upper95}R: the whole interval is below zero. Lower-R:R setups lose money after costs; the 2.5R minimum stays.`; }
   else { verdict = n >= X.decisiveTrades ? 'inconclusive (decisive sample)' : 'inconclusive'; text = `average ${all.avgR}R, 95% interval ${all.lower95}R to ${all.upper95}R includes zero: no demonstrated edge${n >= X.decisiveTrades ? ' even with ' + X.decisiveTrades + '+ trades' : ' yet'}. The 2.5R minimum stays.`; }
   const pnlUsd = +journal.entries.filter((e) => e.mode === 'exploration' && e.outcome?.source === 'trade').reduce((a, e) => a + (e.outcome.pnl ?? 0), 0).toFixed(2);
-  return { enabled: X.enabled, n, ...all, pnlUsd, targetPrelim: X.prelimTrades, targetDecisive: X.decisiveTrades, progress: +Math.min(1, n / X.decisiveTrades).toFixed(2), verdict, text, buckets, risk: { min: X.riskMin, max: X.riskMax }, recent: ts.slice(-8).reverse().map((e) => ({ symbol: e.symbol, setup: e.setup, rr: e.execRR ?? e.rr, R: e.outcome.R, hit: e.outcome.hit, pnl: e.outcome.pnl, why: e.outcome.why })) };
+  const kindOf = (k) => { const rows = ts.filter((e) => (e.xkind ?? 'lowRR') === k), s = stat(rows); const sc = [['50.0-52.0', 50, 52], ['52.0-54.0', 52, 54.5]].map(([label, lo, hi]) => { const r = rows.filter((e) => e.score >= lo && e.score < hi); return { label, ...stat(r) }; }); return { kind: k, ...s, positive: rows.length >= X.prelimTrades && s.lower95 > 0, negative: rows.length >= X.prelimTrades && s.upper95 < 0, scoreBuckets: k === 'lowScore' ? sc : undefined }; };
+  const byKind = { lowRR: kindOf('lowRR'), lowScore: kindOf('lowScore') };
+  const kindText = (k, label, rule) => { const s = byKind[k]; return s.n < X.prelimTrades ? `${label}: ${s.n} of ${X.prelimTrades} closed trades, too few to conclude; ${rule} stays.` : s.positive ? `${label}: average ${s.avgR}R, 95% ${s.lower95} to ${s.upper95}: positive, so lowering ${rule} is worth a human review.` : s.negative ? `${label}: average ${s.avgR}R, 95% ${s.lower95} to ${s.upper95}: negative, ${rule} stays.` : `${label}: average ${s.avgR}R, 95% ${s.lower95} to ${s.upper95}: includes zero, ${rule} stays.`; };
+  const kindTexts = [kindText('lowScore', `Score ${'50-54'} (floor 55 stays)`, 'the normal composite floor'), kindText('lowRR', 'Low R:R (2.5R stays)', 'the 2.5R minimum')];
+  return { enabled: X.enabled, n, ...all, byKind, kindTexts, floorDrop: X.floorDrop, pnlUsd, targetPrelim: X.prelimTrades, targetDecisive: X.decisiveTrades, progress: +Math.min(1, n / X.decisiveTrades).toFixed(2), verdict, text, buckets, risk: { min: X.riskMin, max: X.riskMax }, recent: ts.slice(-8).reverse().map((e) => ({ symbol: e.symbol, setup: e.setup, rr: e.execRR ?? e.rr, R: e.outcome.R, hit: e.outcome.hit, pnl: e.outcome.pnl, why: e.outcome.why })) };
 }
 
 export function report(now = Date.now()) {

@@ -519,9 +519,13 @@ function evaluate(side, inp, T) {
   // Risk is tiny (0.10% - 0.25% of equity), larger for a higher composite. Paper only; the normal rules are untouched.
   const X = B.explore;
   let exploration = null;
-  if (long && X.enabled && action === 'WATCH' && best && shaped && vetoes.some((v) => v.code === 'poor_rr') && vetoes.every((v) => v.code === 'poor_rr' || v.code === 'low_ev') && rrNet >= X.minRR && why.now.length) {
-    const t = clamp((composite - floor) / 20, 0, 1);
-    exploration = { eligible: true, riskPct: +(X.riskMin + (X.riskMax - X.riskMin) * t).toFixed(5), rr: +rrNet.toFixed(2), reason: `fails only the protected ${R.minRR}R requirement (net R:R ${rrNet.toFixed(2)}${ev != null && ev < B.minEV ? `; its modelled EV is ${ev}R, which the experiment exists to test` : ''}); every other gate passed` };
+  // Two separate experiments, never combined (so each can be judged alone): 'lowRR' = fails only the 2.5R rule; 'lowScore' = composite in [floor - floorDrop, floor) while the 2.5R rule is MET.
+  const xfloor = +(floor - X.floorDrop).toFixed(1), evTxt = ev != null && ev < B.minEV ? `; its modelled EV is ${ev}R, which the experiment exists to test` : '';
+  if (long && X.enabled && action === 'WATCH' && best && shaped && why.now.length && vetoes.every((v) => v.code === 'poor_rr' || v.code === 'low_ev' || v.code === 'low_composite')) {
+    const lowRR = vetoes.some((v) => v.code === 'poor_rr'), lowScore = vetoes.some((v) => v.code === 'low_composite');
+    const t = clamp((composite - xfloor) / 20, 0, 1), riskPct = +(X.riskMin + (X.riskMax - X.riskMin) * t).toFixed(5);
+    if (lowRR && !lowScore && rrNet >= X.minRR) exploration = { eligible: true, kind: 'lowRR', riskPct, rr: +rrNet.toFixed(2), reason: `fails only the protected ${R.minRR}R requirement (net R:R ${rrNet.toFixed(2)}${evTxt}); every other gate passed` };
+    else if (lowScore && !lowRR && composite >= xfloor) exploration = { eligible: true, kind: 'lowScore', riskPct, rr: +rrNet.toFixed(2), reason: `composite ${composite} is under the normal floor ${floor} but at least the exploration floor ${xfloor}; the ${R.minRR}R requirement is met (net R:R ${rrNet.toFixed(2)}${evTxt}); every other gate passed` };
   }
 
   const waitingFor = [];

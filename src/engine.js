@@ -386,7 +386,7 @@ async function runBrain(ctxSources) {
   await considerBuys(env, buys);
   if (config.brain.explore.enabled) {
     const explorers = decisions.filter((d) => d.exploration?.eligible).sort((a, b) => b.score - a.score);
-    if (explorers.length) logDecision('info', '*', `exploration: ${explorers.length} setup(s) fail ONLY the protected ${R.minRR}R requirement: ${explorers.slice(0, 5).map((d) => `${d.symbol} (R:R ${d.exploration.rr}, risk ${(d.exploration.riskPct * 100).toFixed(2)}%)`).join(', ')}`);
+    if (explorers.length) logDecision('info', '*', `exploration: ${explorers.length} setup(s) qualify (lowRR = fails only the protected ${R.minRR}R rule; lowScore = composite under the floor): ${explorers.slice(0, 5).map((d) => `${d.symbol} (${d.exploration.kind}, R:R ${d.exploration.rr}, score ${d.score}, risk ${(d.exploration.riskPct * 100).toFixed(2)}%)`).join(', ')}`);
     await considerBuys(env, explorers, { explore: true });
   }
 }
@@ -597,7 +597,7 @@ async function tryEnter(p, confirmation) {
     // The Brain proposes the structural stop and target; risk.shapeTrade keeps the stop inside the coin's band (never wider than 4%) and re-prices R:R at the LIVE entry.
     const shaped = riskLib.shapeTrade(live, d.stop, d.target, { symbol: p.symbol, rank: cs?.coin?.rank ?? 100 });
     const reasons = riskLib.entryFilters({
-      signal: { direction: 'bullish' }, entry: live, shaped, composite: d.score, floor: d.floor, minRR: p.mode === 'exploration' ? config.brain.explore.minRR : undefined, btc: { ...btc, severe: !!state.brain.regime?.severe }, portfolio: state.portfolio,
+      signal: { direction: 'bullish' }, entry: live, shaped, composite: d.score, floor: p.mode === 'exploration' && d.exploration?.kind === 'lowScore' ? d.floor - config.brain.explore.floorDrop : d.floor, minRR: p.mode === 'exploration' && d.exploration?.kind === 'lowRR' ? config.brain.explore.minRR : undefined, btc: { ...btc, severe: !!state.brain.regime?.severe }, portfolio: state.portfolio,
       openCount: state.positions.size, cooldownUntil: cs?.coin?.cooldownUntil, dataFresh: fp.price != null,
     });
     if (live <= shaped.stop) reasons.push('price already at/below the stop level');
@@ -631,12 +631,12 @@ async function tryEnter(p, confirmation) {
     const row = await db.insertTrade({
       symbol: p.symbol, signal_id: p.id.startsWith('mem-') ? null : p.id, status: 'open', entry_price: entryPx, qty, notional,
       target_price: shaped.target, stop_price: stopPx, high_water: entryPx, rr: shaped.rr, confluence_score: d.score, rationale: why,
-      fee_entry: fee, entry_trigger: exploring ? 'brain_explore' : 'brain', prediction: { mode: p.mode ?? 'normal', riskUsd: fin.riskUsd, expected_direction: 'up', decisionId: d.id ?? null, setup: d.setup.name, p_up: d.pUp, ev: d.ev, scores: d.scores, why: d.why, chase: d.chase, entryZone: d.entryZone, factors: d.factors, target: d.target, stop: d.stop, timeframe_hours: d.holdHours, confirmation, trigger: p.trigger ?? null, evidence: d.evidence },
+      fee_entry: fee, entry_trigger: exploring ? 'brain_explore' : 'brain', prediction: { mode: p.mode ?? 'normal', xkind: p.mode === 'exploration' ? d.exploration?.kind ?? null : null, riskUsd: fin.riskUsd, expected_direction: 'up', decisionId: d.id ?? null, setup: d.setup.name, p_up: d.pUp, ev: d.ev, scores: d.scores, why: d.why, chase: d.chase, entryZone: d.entryZone, factors: d.factors, target: d.target, stop: d.stop, timeframe_hours: d.holdHours, confirmation, trigger: p.trigger ?? null, evidence: d.evidence },
       evidence_used: d.reasons.join(' | '), expected_direction: 'up', confidence: d.pUp * 100,
       candle_pattern: `${(d.evidence?.candles ?? []).join(', ') || 'no clear pattern'}; 1m confirm close ${confirmation.c}`, market_regime: `${d.evidence?.regime ?? '?'}; BTC 1h ${btc.regime}`,
     });
     const id = row?.id ?? `mem-trade-${Date.now()}`;
-    if (d.id) learning.attachTrade(d.id, id, p.mode ?? 'normal');
+    if (d.id) learning.attachTrade(d.id, id, p.mode ?? 'normal', p.mode === 'exploration' ? d.exploration?.kind : undefined);
     state.portfolio.cash -= notional + fee;
     state.positions.set(id, {
       id, symbol: p.symbol, mode: p.mode ?? 'normal', rrEntry: shaped.rr, product: p.product, signalId: p.id, decisionId: d.id ?? null, qty, entry: entryPx, notional, fee, stop: stopPx, stopPct: fin.stopPct, riskUsd: fin.riskUsd, target: shaped.target, band: shaped.band, partialTaken: false, horizonHours: clampN(d.holdHours ?? 24, 1, 72),
@@ -1198,7 +1198,7 @@ export async function start() {
       highWater: Number(t.high_water ?? t.entry_price), openedAt: new Date(t.entry_time).getTime(), rationale: t.rationale, lastPrice: null,
       ...(isCopy
         ? { venue: t.source === 'copy_zerion' ? 'onchain' : 'hl', extra: t.prediction ?? null, coin: t.source === 'copy_zerion' ? (t.prediction?.assetKey ?? t.symbol) : t.symbol, leaderSize: Number(t.leader_size ?? 0), copy: { trader: t.source_trader, winRate: Number(t.confidence ?? 0) / 100, tier: t.prediction?.tier ?? 'minimum', leaderPx: Number(t.leader_fill_price), leaderTime: new Date(t.leader_fill_time).getTime(), k: Number(t.prediction?.k ?? 0), latencyMs: 0 } }
-        : { product: `${t.symbol}-USD`, mode: t.prediction?.mode ?? 'normal', rrEntry: Number(t.rr) || undefined, riskUsd: Number(t.prediction?.riskUsd) || undefined, decisionId: t.prediction?.decisionId ?? null, lowWater: Number(t.entry_price), horizonHours: clampN(Number(t.prediction?.timeframe_hours) || 24, 1, 72), trigger: { kind: t.entry_trigger ?? 'scan', reasons: t.prediction?.trigger?.reasons ?? [] } }),
+        : { product: `${t.symbol}-USD`, mode: t.prediction?.mode ?? 'normal', xkind: t.prediction?.xkind ?? null, rrEntry: Number(t.rr) || undefined, riskUsd: Number(t.prediction?.riskUsd) || undefined, decisionId: t.prediction?.decisionId ?? null, lowWater: Number(t.entry_price), horizonHours: clampN(Number(t.prediction?.timeframe_hours) || 24, 1, 72), trigger: { kind: t.entry_trigger ?? 'scan', reasons: t.prediction?.trigger?.reasons ?? [] } }),
       ctx: { conf: { notes: {}, technical: 0, rvol: 0, research: 0, derivatives: 0, total: Number(t.confluence_score ?? 0) }, sig: { evidenceSummary: t.evidence_used ?? '', supporting: [], conflicting: [], confidence: Number(t.confidence ?? 0) }, patterns: {}, btc: String(t.market_regime ?? '').split('BTC 1h ')[1] ?? t.market_regime,
         brain: !isCopy && t.prediction?.setup ? { setup: { name: t.prediction.setup, label: t.prediction.setup.replace(/_/g, ' ') }, score: Number(t.confluence_score ?? 0), pUp: Number(t.prediction.p_up ?? 0), ev: t.prediction.ev, rr: Number(t.rr ?? 0), holdHours: t.prediction.timeframe_hours, factors: t.prediction.factors ?? {}, reasons: String(t.evidence_used ?? '').split(' | '), evidence: t.prediction.evidence ?? {}, id: t.prediction.decisionId } : null },
     });

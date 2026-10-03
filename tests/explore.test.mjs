@@ -130,3 +130,26 @@ test('a closed trade is scored in realised R = net P&L / dollars risked, and the
   const e = learning.closeTrade('trade1', { exitReason: 'stop_loss', pnl: -3.1, pnlPct: -0.03, R: -3.1 / 3.0, rr: 1.9, mfe: 0.004, mae: -0.03, hours: 1.2, why: 'x' });
   assert.equal(e.mode, 'exploration'); assert.ok(Math.abs(e.outcome.R + 1.03) < 0.01); assert.equal(e.execRR, 1.9);
 });
+
+test('score exploration: the floor drop is 5 (55 -> 50), the 2.5R minimum is untouched, and a setup that is not under the floor or R:R is not labelled exploration', () => {
+  assert.equal(X.floorDrop, 5); assert.equal(config.brain.minComposite - X.floorDrop, 50); assert.equal(config.risk.minRR, 2.5);
+  const weak = run({ empirical: noModel, regime: { ...S.regimeBear, score: -0.6, allowLongs: true, severe: false, riskMult: 0.6 } });
+  assert.ok(weak.score >= weak.floor || weak.exploration == null || weak.exploration.kind, 'only a real shortfall creates an exploration candidate');
+  assert.equal(run().exploration, null, 'a normal BUY is never exploration');
+  const d = onlyRR(); assert.equal(d.exploration.kind, 'lowRR');
+});
+
+test('entry filter: an exploration score trade passes at the lowered floor but still needs the full 2.5R and every other gate', () => {
+  const base = { signal: { direction: 'bullish' }, entry: 100, btc: { severe: false }, portfolio: { manual_review_required: false, halted_for_day: false }, openCount: 0, dataFresh: true, shaped: { target: 110, rr: 2.6 } };
+  assert.ok(risk.entryFilters({ ...base, composite: 52, floor: 55 }).some((x) => /composite/.test(x)), 'normal floor 55');
+  assert.deepEqual(risk.entryFilters({ ...base, composite: 52, floor: 55 - X.floorDrop }), [], 'exploration floor 50');
+  assert.ok(risk.entryFilters({ ...base, composite: 48, floor: 55 - X.floorDrop }).some((x) => /composite/.test(x)));
+  assert.ok(risk.entryFilters({ ...base, shaped: { target: 110, rr: 2.0 }, composite: 52, floor: 50 }).some((x) => /R:R/.test(x)), 'the 2.5R rule still applies to score exploration');
+});
+
+test('exploration report splits the two experiments and shows fees/slippage in R and the modelled EV', () => {
+  learning.journal.entries = Array.from({ length: 6 }, (_, i) => ({ id: `k${i}`, at: T0 + i * 3600_000, kind: 'decision', side: 'long', mode: 'exploration', xkind: i < 3 ? 'lowScore' : 'lowRR', symbol: 'X', action: 'WATCH', setup: 'trend_pullback', score: 52, ev: 0.1, entry: 100, stop: 97, rr: 2.7, execRR: 2.7, tradeId: `t${i}`, vetoes: [], evidence: {}, outcome: { R: i % 2 ? 1 : -1, hit: 'x', source: 'trade', mfe: 0.01, mae: -0.01, hoursHeld: 3, pnl: 1 } }));
+  const x = learning.explorationReport();
+  assert.equal(x.byKind.lowScore.n, 3); assert.equal(x.byKind.lowRR.n, 3);
+  assert.ok(x.byKind.lowScore.avgCostR > 0 && x.byKind.lowScore.avgPredEV === 0.1 && x.byKind.lowScore.scoreBuckets.length === 2);
+});
