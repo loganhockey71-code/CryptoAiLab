@@ -124,9 +124,11 @@ for (let T = T0; T <= T1; T += 3600) {
       const ft = firstTouch(cs5, entry, c.stop, c.target, side, Math.min(c.holdHours * 2, 72));
       const obs = observe(cs5, entry, c.stop, side, T, HORIZON_H * 3600, 300);
       const rec = { sym: s, T, side, setup: c.setup.name, score: c.score, scores: c.scores, chase: c.chase && { verdict: c.chase.verdict, score: c.chase.score, atLevel: c.chase.atLevel }, vetoes: c.vetoes.map((v) => v.code), hard: c.vetoes.filter((v) => v.hard).map((v) => v.code),
-        action: c.action, pUp: c.pUp, pSample: c.pSample, targetR: c.targetR, rr: c.rr, stopDist: c.stopDist, regime: regime.label, severe: regime.severe, ft, reach: obs?.reach ?? null, maxR: obs?.maxR ?? null, matured: complete(s, T, HORIZON_H) };
+        floor: c.floor, action: c.action, pUp: c.pUp, pSample: c.pSample, targetR: c.targetR, rr: c.rr, stopDist: c.stopDist, regime: regime.label, severe: regime.severe, ft, reach: obs?.reach ?? null, maxR: obs?.maxR ?? null, matured: complete(s, T, HORIZON_H) };
       cands.push(rec);
-      if (obs && rec.matured) pending.push({ T, side, setup: rec.setup, reach: obs.reach, use: rec.chase?.verdict !== 'chasing' });
+      // The probability model is calibrated on the population the Brain would ACTUALLY take: candidates that pass every gate except the EV test itself. Calibrating on all setups (including the ones it
+      // would never take) is adverse-selection blind: the gates pick a different, here worse, population than the average setup.
+      if (obs && rec.matured) pending.push({ T, side, setup: rec.setup, reach: obs.reach, use: rec.vetoes.every((v) => v === 'low_ev') });
     }
   }
 }
@@ -154,7 +156,7 @@ table('By timing score:', group(longs, (r) => (r.scores.timing >= 80 ? 'timing 8
 table('Same for shorts, by anti-chasing verdict:', group(shorts, (r) => r.chase?.verdict ?? '?'));
 
 console.log('\n=== PROBABILITY CALIBRATION, walk-forward (fit on the earlier 60%, scored on the later 40%; each observation x each R level) ===');
-const obsAll = cands.filter((c) => c.reach && c.matured && c.chase?.verdict !== 'chasing').sort((a, b) => a.T - b.T);
+const obsAll = cands.filter((c) => c.reach && c.matured && c.vetoes.every((v) => v === 'low_ev')).sort((a, b) => a.T - b.T);      // the selected population (everything but the EV test)
 const cut = Math.floor(obsAll.length * config.brain.learnTrainFrac), train = obsAll.slice(0, cut), test = obsAll.slice(cut);
 const tabFrom = (rows) => { const t = {}; for (const r of rows) { const x = (t[`${r.side}:${r.setup}`] ??= { n: 0, hits: LEVELS.map(() => 0) }); x.n++; r.reach.forEach((v, i) => { if (v) x.hits[i]++; }); } return t; };
 const mTrain = buildModel(tabFrom(train), []);
@@ -181,7 +183,7 @@ table('Long candidates that passed direction + timing (no geometry/probability y
 table('Veto frequency among long candidates:', group(longs, (r) => r.vetoes));
 
 if (process.argv.includes('--calibrate')) {
-  saveHistorical({ builtAt: Date.now(), days: DAYS, rows: obsAll.length, coins: syms.length, tables: tabFrom(obsAll), walkForward: wf, note: 'observations = hypothetical trades at every defined setup (not chasing), walked forward on 5m candles; reach = hit +R before the stop within 48h' });
+  saveHistorical({ builtAt: Date.now(), days: DAYS, rows: obsAll.length, coins: syms.length, tables: tabFrom(obsAll), walkForward: wf, note: 'observations = hypothetical trades at every defined setup that passes every gate except the EV test (the population the Brain would actually take), walked forward on 5m candles; reach = hit +R before the stop within 48h' });
   console.log(`\ncalibration written to logs/calibration.json (${obsAll.length} observations)`);
 }
 fs.writeFileSync(path.join(CACHE, `bt-candidates-${DAYS}d.json`), JSON.stringify(cands));

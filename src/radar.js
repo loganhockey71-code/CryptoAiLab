@@ -7,18 +7,30 @@ const Z = config.radar, U = config.universe;
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
 
 /**
- * Rejects coins that must never be entered: illiquid, tiny, wash-trading-looking, thin-volume spikes, or missing data.
+ * Rejects only coins that cannot be traded: no usable price/volume, genuinely illiquid (< $1M 24h volume) or tiny (< $5M cap). Wash-trading ratios and thin-volume spikes are WARNINGS (screenWarnings).
  * `c` is a tradable-coin record (price, mcap, vol24, chg1h, chg24h). Returns null when acceptable.
  */
 export function rejectReason(c) {
   if (!c || !(c.price > 0)) return { code: 'insufficient_data', text: 'insufficient data: no usable price' };
-  if (c.vol24 == null || c.mcap == null) return { code: 'insufficient_data', text: 'insufficient data: volume or market cap unknown' };
+  if (c.vol24 == null) return { code: 'insufficient_data', text: 'insufficient data: 24h volume unknown' };
+  if (c.mcap == null && c.vol24 < 5_000_000) return { code: 'insufficient_data', text: 'market cap unknown and 24h volume under $5M: not enough liquidity data to compensate' };   // a missing market cap is fine when the volume is clearly sufficient
   if (c.vol24 < U.minVolume24hUsd) return { code: 'illiquid', text: `illiquid: 24h volume $${Math.round(c.vol24).toLocaleString('en-US')} < $${U.minVolume24hUsd.toLocaleString('en-US')}` };
   if (c.mcap > 0 && c.mcap < Z.minMcapUsd) return { code: 'tiny_cap', text: `market cap $${Math.round(c.mcap).toLocaleString('en-US')} < $${Z.minMcapUsd.toLocaleString('en-US')}: too easy to manipulate` };
-  const ratio = c.mcap > 0 ? c.vol24 / c.mcap : 0;
-  if (ratio > Z.maxVolMcap && c.mcap < Z.washCapCeiling) return { code: 'wash_trading', text: `24h volume is ${ratio.toFixed(1)}x market cap: possible wash trading` };
-  if (Math.abs(c.chg1h ?? 0) >= Z.thinSpikePct && c.vol24 < Z.thinSpikeVol) return { code: 'thin_spike', text: `${((c.chg1h ?? 0) * 100).toFixed(0)}% 1h move on only $${Math.round(c.vol24).toLocaleString('en-US')} volume: looks manipulated` };
   return null;
+}
+
+/**
+ * Conditions that deserve a second look but do NOT reject a coin (they cost it score, and the order-book / structure checks decide the rest):
+ * extreme volume vs market cap (possible wash trading), a 20%+ hour on thin volume, a missing market cap.
+ */
+export function screenWarnings(c) {
+  const w = [];
+  if (!c) return w;
+  const ratio = c.mcap > 0 ? c.vol24 / c.mcap : 0;
+  if (ratio > Z.maxVolMcap && c.mcap < Z.washCapCeiling) w.push(`24h volume is ${ratio.toFixed(1)}x market cap: possible wash trading (flagged for review, not rejected)`);
+  if (Math.abs(c.chg1h ?? 0) >= Z.thinSpikePct && (c.vol24 ?? 0) < Z.thinSpikeVol) w.push(`${((c.chg1h ?? 0) * 100).toFixed(0)}% 1h move on only ${Math.round(c.vol24).toLocaleString('en-US')} volume: major warning (liquidity and structure decide)`);
+  if (c.mcap == null) w.push('market cap unknown (liquidity data is sufficient, so the coin is still considered)');
+  return w;
 }
 
 /** Cheap priority 0-100 for the research queue, with human-readable reasons. */

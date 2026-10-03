@@ -18,15 +18,15 @@ test('1. a coin that already pumped is NOT bought: the direction is bullish, the
   for (const model of [fx, none]) {
     const { d, chg24h } = S.decideOn(mk.pumped, { empirical: model });
     assert.ok(chg24h > 0.1, `it really pumped (${chg24h})`);
-    assert.ok(d.scores.direction >= B.minDirection, `direction is bullish (${d.scores.direction})`);
+    assert.ok(d.scores.direction >= 60, `direction is bullish (${d.scores.direction})`);
     assert.equal(d.chase.verdict, 'chasing');
     assert.ok(d.chase.moveAtr > 3 && d.chase.distLevelAtr > 2 && d.chase.expectedMoveUsed > 0.7, JSON.stringify(d.chase));
     assert.notEqual(d.action, 'BUY');
     assert.equal(d.verdict, 'WAIT');
-    assert.ok(d.vetoes.some((v) => v.code === 'chasing'));
+    assert.ok(d.cautions.some((c) => c.code === 'chasing'), 'anti-chasing is a heavy penalty and is reported');
     assert.equal(d.why.now.length, 0, 'there is no concrete "why now"');
     assert.ok(/pullback \/ retest/.test(d.waitingFor.join(' ')), d.waitingFor.join(' | '));
-    assert.ok(d.scores.timing < B.minTiming);
+    assert.ok(d.scores.timing < 40 && d.score < d.floor, `timing ${d.scores.timing}, composite ${d.score} < floor ${d.floor}`);
   }
 });
 
@@ -34,40 +34,42 @@ test('2. a coin beginning a strong move with a fresh entry (breakout -> retest h
   const { d, price } = S.decideOn(mk.fresh, { empirical: fx });
   assert.equal(d.setup.name, 'breakout_retest');
   assert.equal(d.chase.verdict, 'fresh');
-  assert.ok(d.scores.direction >= B.minDirection && d.scores.timing >= B.minTiming && d.scores.geometry >= B.minGeometry, JSON.stringify(d.scores));
+  assert.ok(d.scores.direction >= 60 && d.scores.timing >= 60, JSON.stringify(d.scores));
+  assert.ok(d.score >= d.floor, `composite ${d.score} clears the floor ${d.floor}`);
   assert.equal(d.action, 'BUY'); assert.equal(d.verdict, 'LONG');
-  assert.deepEqual(d.vetoes.filter((v) => v.hard || v.code === 'chasing'), []);
+  assert.deepEqual(d.vetoes, []);
   assert.ok(d.why.now.length >= 2 && /retested/.test(d.why.now[0]), d.why.now.join(' | '));
-  assert.ok(d.why.confirms[0].includes('INSIDE the zone') && d.why.invalidates.length === 2 && d.why.failure.length >= 1);
+  assert.ok(/in or just past the zone/.test(d.why.confirms[0]) && d.why.confirms[0].includes('hold the level') && d.why.invalidates.length === 2 && d.why.failure.length >= 1);
   assert.ok(price >= d.entryZone.lo && price <= d.entryZone.hi, 'price is inside the planned zone');
   assert.equal(d.maxEntry, d.entryZone.hi, 'a confirmation beyond the top of the zone is chasing');
-  assert.ok(d.rr >= config.risk.minRR && d.ev >= B.minEV && d.pUp >= B.minPUp);
+  assert.ok(d.rr >= config.risk.minRR && d.ev >= B.minEV && d.evLB > 0, `R:R ${d.rr}, EV ${d.ev}R, lower bound ${d.evLB}R`);
 });
 
 test('2b. the SAME fresh setup is only WAIT while its probability is unproven (no measured history): no claimed edge', () => {
   const { d } = S.decideOn(mk.fresh, { empirical: none });
   assert.equal(d.verdict, 'WAIT');
-  assert.ok(d.vetoes.some((v) => v.code === 'low_probability' || v.code === 'low_ev'));
+  assert.ok(d.vetoes.some((v) => v.code === 'low_ev'), 'without measured history the EV is not meaningfully positive after allowing for uncertainty');
   assert.ok(/zero-drift prior/.test(d.pUpSource), d.pUpSource);
 });
 
 test('3. a bullish coin with bad timing: strong direction, no entry -> WAIT, and the reason is timing, not direction', () => {
   const { d } = S.decideOn(mk.grind, { empirical: fx });
-  assert.ok(d.scores.direction >= B.minDirection, `direction ${d.scores.direction}`);
-  assert.ok(d.scores.timing < B.minTiming, `timing ${d.scores.timing}`);
+  assert.ok(d.scores.direction >= 60, `direction ${d.scores.direction}`);
+  assert.ok(d.scores.timing < 40, `timing ${d.scores.timing}`);
   assert.equal(d.verdict, 'WAIT');
-  assert.ok(d.vetoes.some((v) => ['chasing', 'late_entry', 'outside_zone', 'bad_timing', 'no_setup'].includes(v.code)));
+  assert.ok([...d.vetoes, ...d.cautions].some((v) => ['chasing', 'late_entry', 'outside_zone', 'no_setup', 'low_composite'].includes(v.code)));
   assert.equal(d.why.now.length, 0);
 });
 
 /* ================================================================ scoring structure */
-test('the overall score is the WEAKEST of direction / timing / geometry: a strong trend cannot hide a poor entry', () => {
+test('the composite is a RANKING score, but a very weak part and chasing pull it down: a strong trend cannot hide a poor entry', () => {
   for (const c5 of [mk.pumped, mk.fresh, mk.grind]) {
     const { d } = S.decideOn(c5, { empirical: fx });
-    assert.equal(d.score, Math.min(d.scores.direction, d.scores.timing, d.scores.geometry));
+    assert.ok(d.score <= d.mean + 1e-9, `composite ${d.score} never exceeds the plain weighted mean ${d.mean}`);
   }
   const { d } = S.decideOn(mk.pumped, { empirical: fx });
-  assert.ok(d.mean > d.score + 20, `a naive average (${d.mean}) would have hidden the problem (${d.score})`);
+  assert.ok(d.mean > d.score + 8, `the plain weighted mean (${d.mean}) would have hidden the problem (${d.score})`);
+  assert.ok(d.scores.direction > 60 && d.score < d.floor);
 });
 
 test('correlated indicators never count as independent confirmation (momentum is one family and is excluded from the agreement count)', () => {
@@ -78,22 +80,21 @@ test('correlated indicators never count as independent confirmation (momentum is
   }
 });
 
-test('every LONG requires the three gates, the entry check refuses a decision that fails any one, and the risk filter is wired to them', async () => {
+test('the entry filter checks the composite against the (regime-adjusted) floor, the protected R:R, and only a SEVERE BTC blocks', async () => {
   const risk = await import('../src/risk.js');
   const shaped = { target: 110, rr: 3 }, base = { signal: { direction: 'bullish' }, entry: 100, shaped, btc: { severe: false }, portfolio: { manual_review_required: false, halted_for_day: false }, openCount: 0, dataFresh: true };
-  assert.deepEqual(risk.entryFilters({ ...base, scores: { direction: 80, timing: 80, geometry: 80 } }), []);
-  for (const k of ['direction', 'timing', 'geometry']) {
-    const r = risk.entryFilters({ ...base, scores: { direction: 80, timing: 80, geometry: 80, [k]: 10 } });
-    assert.ok(r.some((x) => x.startsWith(k) || x.startsWith('trade geometry')), `${k}: ${r}`);
-  }
-  assert.ok(risk.entryFilters({ ...base, btc: { severe: true }, scores: { direction: 80, timing: 80, geometry: 80 } }).some((x) => /severe/.test(x)));
+  assert.deepEqual(risk.entryFilters({ ...base, composite: 70, floor: 55 }), []);
+  assert.ok(risk.entryFilters({ ...base, composite: 40, floor: 55 }).some((x) => /composite/.test(x)));
+  assert.ok(risk.entryFilters({ ...base, composite: 70, floor: 55, shaped: { target: 110, rr: 2.0 } }).some((x) => /R:R/.test(x)), 'the protected 2.5 minimum still applies');
+  assert.ok(risk.entryFilters({ ...base, composite: 70, floor: 55, btc: { severe: true } }).some((x) => /severe/.test(x)));
+  assert.deepEqual(risk.entryFilters({ ...base, composite: 70, floor: 55, btc: { severe: false, bullish: false } }), [], 'a merely weak BTC is not a block');
 });
 
 /* ============================================================================ shorts */
 test('SHORT is evaluated with its own logic: a downtrend with sellers in control is a short candidate, never a long', () => {
   const { d } = S.decideOn(mk.bounce, { empirical: S.fixtureModelShort(), regime: S.regimeBear });
   assert.equal(d.side, 'short');
-  assert.ok(d.short.scores.direction >= B.minDirection, JSON.stringify(d.short.scores));
+  assert.ok(d.short.scores.direction >= 55, JSON.stringify(d.short.scores));
   assert.ok(['SHORT', 'WAIT'].includes(d.verdict));
   assert.notEqual(d.long.verdict, 'LONG');
   assert.ok(d.reasons.some((r) => /Relative strength|Supply/.test(r)));
@@ -149,7 +150,7 @@ test('empirical: a setup that reaches 1.5R but rarely 2.5R is recognised, and a 
   const m = E.buildModel({ 'long:breakout_retest': { n: 200, hits: [150, 110, 80, 40, 20, 8, 2] } }, []);
   assert.ok(m.realisticR('breakout_retest', 'long', 0.3) <= 2);
   const { d } = S.decideOn(mk.fresh, { empirical: m });
-  assert.ok(d.vetoes.some((v) => v.code === 'unrealistic_target' || v.code === 'low_probability'));
+  assert.ok(d.cautions.some((v) => v.code === 'unrealistic_target') || d.vetoes.some((v) => v.code === 'low_ev'));
   assert.notEqual(d.action, 'BUY');
 });
 

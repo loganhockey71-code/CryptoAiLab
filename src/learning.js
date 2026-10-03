@@ -201,7 +201,7 @@ const resolvedAll = () => journal.entries.filter((e) => e.outcome && e.outcome.R
 /** The empirical P(reach +R before the stop) model: historical backtest observations (logs/calibration.json) plus every measured journal entry that has a setup. Cached for a minute. */
 let modelCache = { at: 0, n: -1, m: null };
 export function empiricalModel(now = Date.now()) {
-  const live = journal.entries.filter((e) => e.outcome?.reach && e.setup);
+  const live = journal.entries.filter((e) => e.outcome?.reach && e.setup && (e.vetoes ?? []).every((v) => v === 'low_ev'));      // the SELECTED population: passes every gate except the EV test
   if (modelCache.m && modelCache.n === live.length && now - modelCache.at < 60_000) return modelCache.m;
   modelCache = { at: now, n: live.length, m: buildModel(undefined, live.map((e) => ({ dir: e.side === 'short' ? 'short' : 'long', setup: e.setup, reach: e.outcome.reach }))) };
   return modelCache.m;
@@ -237,7 +237,7 @@ const lossTags = (e) => {
   if (/breakout|breakdown/.test(e.setup ?? '') && o.hit === 'stop' && (o.tStop ?? o.hoursToHit ?? 99) <= 6) t.push('breakout failure (stopped within 6h)');
   if ((o.maxR ?? 0) >= 1 && o.hit !== 'target') t.push('unrealistic target (reached 1R+ but not the target)');
   if (o.hit === 'stop' && (o.tStop ?? o.hoursToHit ?? 99) < 1) t.push('stopped within the hour');
-  if ((e.scores?.timing ?? 100) < B.minTiming) t.push('weak timing score');
+  if ((e.scores?.timing ?? 100) < 40) t.push('weak timing score');
   if (e.setup) t.push(`setup: ${e.setup.replace(/_/g, ' ')}`);
   return t;
 };
@@ -304,7 +304,7 @@ const VETO_TEXT = {
   supply_control: 'sellers were in control on the 1h', major_conflict: 'too many major signals pointed down', bad_news: 'a dangerous news event was active', regime: 'the market regime (BTC) did not allow long entries',
   wait_15m_turn: 'the 15m had not turned up yet', mid_range: 'price was in the middle of a range', poor_rr: 'reward-to-risk was too poor at that price (no room to the next resistance)',
   low_score: 'the evidence score was below the entry threshold', low_probability: 'the estimated probability was below the threshold', low_ev: 'expected value was too low', overextended: 'price was already extended', no_setup: 'no defined setup was present',
-  no_valid_stop: 'no structural stop fit inside the 4% cap', illiquid_book: 'the order book was too thin', screened_out: 'the coin was screened out as illiquid / manipulated-looking', no_data: 'there was not enough candle history',
+  no_valid_stop: 'no structural stop fit inside the 4% cap', downtrend_h4_extreme: 'the 4h was in a strong downtrend with no reversal evidence', downtrend_h1_extreme: 'the 1h was in a strong downtrend with heavy selling and no reversal evidence', catastrophic_news: 'catastrophic coin-specific news was active', severe_regime: 'the market was in a severe crash / downtrend', low_composite: 'the combined direction / timing / geometry score was too low', no_why_now: 'there was no trigger for acting at that price', dead_market: 'there was too little volatility to cover costs and the target', illiquid_book: 'the order book was too thin', screened_out: 'the coin was screened out as illiquid / manipulated-looking', no_data: 'there was not enough candle history',
 };
 
 /**

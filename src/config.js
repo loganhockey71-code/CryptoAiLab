@@ -89,14 +89,21 @@ export const config = {
   // THE BRAIN (src/brain.js): the AI's own market analysis decides every entry. Scores, weights and the probability map are model parameters, NOT risk limits: they are
   // calibrated offline (scripts/backtest-brain.mjs) and may only be nudged by walk-forward-validated learning (src/learning.js), bounded by learnBound points.
   brain: Object.freeze({
-    minScore: 80,                // = config.risk.minConfluence: the edge score a BUY needs (risk rule, learning can never lower it)
+    minScore: 80,                // legacy display value, no longer a gate
     watchScore: 55,              // below this a coin with no veto is simply NEUTRAL
     // P(target before stop) and expected value in R after costs. Priors are anchored to BACKTEST base rates (scripts/backtest-brain.mjs: entries meeting the real criteria hit
     // a 2.5R+ target first only ~20-30% of the time and the held-out half was worse), so the score map below is deliberately modest: only the top tail of setups clears it.
-    minPUp: 0.30, minEV: 0.15,
+    // EV (win probability x reward - loss, net of fees, spread and slippage) must be MEANINGFULLY positive: at least minEV AND still positive after subtracting evSeK standard errors of the
+    // estimate (so a thin or noisy sample cannot pass). minPUp is only the yardstick for a REALISTIC target (the largest R a setup reaches at least that often), not an entry gate.
+    minPUp: 0.30, minEV: 0.05, evSeK: 1.0, dataMinN: 30,
     // Three separate gates (direction / timing / trade geometry): each must pass ON ITS OWN. The overall score is the weakest of the three, so a strong trend cannot hide a poor entry.
-    minDirection: 62, minTiming: 65, minGeometry: 55,
-    chaseWarn: 0.4, chaseVeto: 0.6,          // anti-chasing score (0 fresh .. 1 fully chased): above warn = "late" (timing drops), above veto = WAIT for a pullback / retest
+    // Direction / timing / geometry are RANKING inputs, not three separate cutoffs. They combine into one composite (weights below); a very weak component drags the composite down (weak-link
+    // penalty) so a strong trend still cannot buy a terrible entry. A coin is eligible when its composite clears minComposite (tightened in a weak BTC regime, relaxed for exceptional relative
+    // strength) AND its EV is meaningfully positive AND the protected R:R / stop rules hold. Eligible coins are RANKED against each other each scan and the best few are taken.
+    composite: Object.freeze({ wDirection: 0.35, wTiming: 0.30, wGeometry: 0.35, weakBelow: 35, weakPenalty: 0.8, chasePenaltyFrom: 0.5, chasePenalty: 25 }), minComposite: 55,
+    zoneTolerance: 0.5,                      // price up to this many ATRs beyond the planned zone: the zone is RECALCULATED around the live price instead of giving up
+    cancelBeyond: 1.0,                       // a pending entry is cancelled (and recalculated next scan) when price runs this many ATRs past the zone: never chased
+    chaseWarn: 0.4, chaseVeto: 0.6,          // anti-chasing score (0 fresh .. 1 fully chased): a PENALTY on timing and composite, never an automatic rejection
     detectShorts: true,                      // SHORT setups are detected, scored, journaled and measured (counterfactual) ...
     allowShortTrades: false,                 // ... but not executed: CLAUDE.md keeps the strategy long-only for v1 (shorts need a perp venue and their own stop engine). Flip only deliberately.
     newsMinSamples: 15,                      // a news rule gets full weight only after this many measured reactions agree with its expected direction (default weight 0.5)
@@ -108,7 +115,7 @@ export const config = {
     // so they are weighted low; setup quality and the R:R / location geometry (which set the payoff, not a prediction) carry the most.
     weights: Object.freeze({ trend: 0.14, flow: 0.14, candles: 0.07, volume: 0.08, momentum: 0.05, structure: 0.16, regime: 0.08, relStrength: 0.02, news: 0.05, setup: 0.20, smart: 0.01 }),
     calib: Object.freeze({ mid: 72, width: 10, floor: 0.15, ceil: 0.45 }),   // score -> P(target before stop); replaced by the live record as outcomes accumulate
-    maxSpreadPct: 0.4, minDepthUsd: 25_000,
+    maxSpreadPct: 0.4, minDepthUsd: 10_000,   // only EXTREMELY thin books veto (positions are at most ~$600)
     maxBuysPerScan: 2, ringPerSymbol: 48, ringEveryMs: 20 * 60_000,
     sellConfirmScans: 2,         // a SELL on an open position must hold on this many consecutive scans
     learnBound: 8, learnMinTrain: 8, learnMinTest: 5, learnTrainFrac: 0.6,

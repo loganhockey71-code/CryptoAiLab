@@ -259,7 +259,7 @@ function renderBrain(b) {
 
 let ruleSet = null;
 const verdictPill = (o) => `<span class="pill ${o.verdict === 'LONG' ? 'good' : o.verdict === 'SHORT' ? 'bad' : 'amber'}">${esc(o.verdict || o.action)}</span>`;
-const scoreBar = (label, v, min) => `<div class="sc ${v >= min ? 'ok' : 'low'}"><span>${label}</span><b>${v == null ? '—' : v}</b><i><u style="width:${Math.max(0, Math.min(100, v || 0))}%"></u><s style="left:${min}%"></s></i></div>`;
+const scoreBar = (label, v) => `<div class="sc ${v >= 60 ? 'ok' : 'low'}"><span>${label}</span><b>${v == null ? '—' : v}</b><i><u style="width:${Math.max(0, Math.min(100, v || 0))}%"></u></i></div>`;
 const chaseText = (c) => (c ? `<span class="${c.verdict === 'fresh' ? 'up' : c.verdict === 'late' ? 'warn' : 'down'}"><b>${esc(c.verdict)}</b></span> (score ${c.score}): ${c.moveAtr} ATR moved in 12 bars · ${c.distLevelAtr} ATR from the level · ${(c.expectedMoveUsed * 100).toFixed(0)}% of the move used${c.atLevel ? ' · <i>back at the level (retest)</i>' : ''}${c.spikeSpent ? ' · volume spike already spent' : ''}${c.stretched ? ' · stretched' : ''}` : '—');
 const rsText = (r) => (r ? `${pct(r.vs1h)} vs market (1h) · ${pct(r.vsBTC24)} vs BTC · ${pct(r.vsETH24)} vs ETH · ${pct(r.vsMkt24)} vs market (24h)` : '—');
 const whyList = (w) => (w ? [['Why this coin', w.coin], ['Why this direction', w.direction], ['Why this price', w.price], ['Why NOW', w.now && w.now.length ? w.now : ['<span class="down">no concrete reason to enter at this price right now: WAIT</span>']], ['What confirms it', w.confirms], ['What invalidates it', w.invalidates], ['What could make it fail', w.failure]]
@@ -268,11 +268,11 @@ const whyList = (w) => (w ? [['Why this coin', w.coin], ['Why this direction', w
 function oppCard(o) {
   const live = o.action === 'BUY' || o.action === 'SHORT';
   const lv = (x) => (x == null ? '—' : price(x));
-  const sc = o.scores || {}, R = ruleSet || { minDirection: 62, minTiming: 65, minGeometry: 55 };
+  const sc = o.scores || {};
   return `<div class="opp ${live ? 'buy' : ''}" data-sym="${esc(o.symbol)}">
     <h4>${esc(o.symbol)} <span class="muted" style="font-weight:400">${esc(o.name)}</span> ${verdictPill(o)}${clsPill(o.cls)}${o.setup ? `<span class="pill own">${esc(o.setup)}</span>` : ''}
-      <span class="big"><b>${o.score}</b> weakest of the 3<br>P(target first) ${(o.pUp * 100).toFixed(0)}% · EV ${o.ev == null ? '—' : o.ev + 'R'}</span></h4>
-    <div class="scs">${scoreBar('Direction', sc.direction, R.minDirection)}${scoreBar('Timing', sc.timing, R.minTiming)}${scoreBar('Geometry', sc.geometry, R.minGeometry)}</div>
+      <span class="big"><b>${o.score}</b> composite (floor ${o.floor ?? '—'})<br>P(target first) ${(o.pUp * 100).toFixed(0)}% · EV ${o.ev == null ? '—' : o.ev + 'R'}${o.evLB != null ? ` (lower bound ${o.evLB}R)` : ''}<br>data confidence ${o.confidence == null ? '—' : (o.confidence * 100).toFixed(0) + '%'}</span></h4>
+    <div class="scs">${scoreBar('Direction', sc.direction)}${scoreBar('Timing', sc.timing)}${scoreBar('Geometry', sc.geometry)}</div>
     <div class="facts">
       <span class="k">Signal</span><span>${esc(o.verdict || o.action)} · confidence ${(o.pUp * 100).toFixed(0)}% <span class="muted">(${esc(o.pUpSource || '')})</span></span>
       <span class="k">Trend</span><span class="tr">${trendTags(o.trend)}</span>
@@ -288,6 +288,7 @@ function oppCard(o) {
     <div class="whyblock">${whyList(o.why)}</div>
     ${o.waitingFor && o.waitingFor.length ? `<div class="wait"><b>WAITING FOR:</b> ${o.waitingFor.map(esc).join(' · ')}</div>` : ''}
     ${o.vetoes && o.vetoes.length ? `<div class="why"><b>Blocked by:</b> ${o.vetoes.slice(0, 4).map(esc).join(' · ')}</div>` : ''}
+    ${(o.cautions && o.cautions.length) || (o.penalties && o.penalties.length) ? `<div class="why"><b>Cautions / score penalties (not blockers):</b> ${[...(o.cautions || []), ...(o.penalties || [])].slice(0, 5).map(esc).join(' · ')}</div>` : ''}
     ${o.other && o.other.setup ? `<div class="why"><b>Other side (${esc(o.other.side)}):</b> ${esc(o.other.verdict)} · ${esc(o.other.setup)} · direction ${o.other.scores.direction}</div>` : ''}
     ${o.adjustments && o.adjustments.length ? `<div class="why"><b>Learned rules applied:</b> ${o.adjustments.map((a) => esc(a.why) + ' (' + (a.delta > 0 ? '+' : '') + a.delta + ')').join('; ')}</div>` : ''}
   </div>`;
@@ -300,7 +301,7 @@ function renderLearning(L, rules, positions) {
   const rel = L.reliability, lc = L.lossClusters, nw = L.news, hist = L.historical;
   $('#learning').innerHTML = `<div class="rep">
     ${L.sufficiency && L.sufficiency.length ? L.sufficiency.map((n) => `<p class="note">⚠ ${esc(n)}</p>`).join('') : ''}
-    <p class="muted">Entry rules in force: LONG needs direction ≥ ${rules.minDirection}, timing ≥ ${rules.minTiming} and geometry ≥ ${rules.minGeometry} <b>each</b>, chase score < ${rules.chaseVeto}, P(target first) ≥ ${(rules.minPUp * 100).toFixed(0)}%, EV ≥ ${rules.minEV}R, net R:R ≥ ${rules.minRR}, no veto, and a concrete "why now". Tracked traders: ${esc(rules.copyTrading)}.</p>
+    <p class="muted">Entry rules in force: direction, timing and geometry are blended into ONE composite and coins are RANKED against each other (weights ${rules.weights.wDirection}/${rules.weights.wTiming}/${rules.weights.wGeometry}; a very weak part and chasing pull it down). A coin needs a composite above its floor (${rules.minComposite}, tighter in a weak BTC regime, looser for exceptional relative strength), EV ≥ ${rules.minEV}R <b>and</b> still positive after allowing for estimate uncertainty (${rules.evSeK} standard errors), the protected net R:R ≥ ${rules.minRR} and stop ≤ 4%, no real veto (severe market, catastrophic coin news, extreme downtrend with no reversal, extremely thin book, no volatility), and some trigger. ${rules.discovered} discovered setups loaded. Tracked traders: ${esc(rules.copyTrading)}.</p>
     <h3>Open positions: HOLD / SELL</h3>${positions && positions.length ? positions.map((p) => `<p><b>${esc(p.symbol)}</b> <span class="pill ${p.action === 'SELL' ? 'bad' : 'good'}">${esc(p.action)}</span> ${esc(p.reasons[0] || '')}${p.invalidation ? ` <span class="muted">(thesis breaks below ${price(p.invalidation)})</span>` : ''}</p>`).join('') : '<p class="muted">No open positions.</p>'}
     <h3>Real paper trades</h3><p>${st(L.trades)}</p>
     <h3>Counterfactuals: every setup AND every coin the brain declined, measured from real candles</h3>

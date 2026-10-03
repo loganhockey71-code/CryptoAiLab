@@ -14,6 +14,7 @@ import { analyzeAll } from './structure.js';
 import * as brain from './brain.js';
 import * as newsimpact from './newsimpact.js';
 import * as learning from './learning.js';
+import * as discovery from './discovery.js';
 import * as riskLib from './risk.js';
 import { downtrendSignal } from './exits.js';
 import { guard } from './guardrails.js';
@@ -109,8 +110,8 @@ async function analyzeCoin(coin) {
     const ageMin = (Date.now() / 1000 - last5.t) / 60;
     const priceDiff = Math.abs(last5.c - coin.price) / coin.price;
     if (ageMin > 20) cs.health = { ok: false, reason: `stale candles (${ageMin.toFixed(0)}m old)` };
-    else if (priceDiff > ((Date.now() - (coin.priceAt ?? 0)) < 10 * 60_000 ? 0.05 : 0.25)) cs.health = { ok: false, reason: `contradictory price: exchange ${last5.c} vs CoinGecko ${coin.price}` };
-    else cs.health = { ok: true, reason: null, checkedAt: Date.now() };
+    else if (priceDiff > ((Date.now() - (coin.priceAt ?? 0)) < 10 * 60_000 ? 0.15 : 0.40)) cs.health = { ok: false, reason: `contradictory price: exchange ${last5.c} vs reference ${coin.price} (${(priceDiff * 100).toFixed(0)}% apart: the data is clearly broken)` };
+    else cs.health = { ok: true, reason: null, warn: priceDiff > ((Date.now() - (coin.priceAt ?? 0)) < 10 * 60_000 ? 0.05 : 0.15) ? `exchange price ${last5.c} differs ${(priceDiff * 100).toFixed(1)}% from the reference price ${coin.price} (warning, not a rejection)` : null, checkedAt: Date.now() };
     cs.ta = analyzeAll({ d1, h1, m15, m5 });                       // swings, levels, ranges, candle patterns, buyer/seller pressure per timeframe (structure.js)
     cs.h1series = h1.slice(-50).map((c) => ({ t: c.t, h: c.h, l: c.l, c: c.c }));   // for news priced-in checks and the missed-move review
     cs.snaps = { '1d': snapshot(d1), '4h': snapshot(aggregate(h1, 4 * 3600)), '1h': snapshot(h1), '15m': snapshot(m15), '5m': snapshot(m5) };
@@ -262,7 +263,7 @@ function priorityOf(cs) {
 function rejectFor(cs) {
   const r = radarLib.rejectReason(cs?.coin);
   if (r) return r;
-  if (!cs?.ta?.['1h'] || !cs.ta['15m'] || !cs.ta['5m']) return { code: 'insufficient_data', text: 'insufficient candle history (need 60+ completed candles on 1h, 15m and 5m)' };
+  if (!cs?.ta?.['1h'] || !cs.ta['15m']) return { code: 'insufficient_data', text: 'insufficient candle history to calculate the indicators the setups use (1h and 15m; 4h / 5m are optional and the nearest timeframe stands in)' };
   return null;
 }
 
@@ -291,6 +292,7 @@ function thinkAbout(cs, env) {
     symbol: cs.symbol, name: coin.name, ta: cs.ta, regime: env.regime, market: env.market, rejected,
     news: newsimpact.coinImpact(env.events, { symbol: cs.symbol, name: coin.name }, moveSinceFor(cs), cs.ta?.['1h']?.atrPct, env.newsTrust),
     book: cs.book && Date.now() - cs.book.at < 180_000 ? cs.book : null,
+    warnings: [...radarLib.screenWarnings(coin), ...(cs.health?.warn ? [cs.health.warn] : [])], discovered: discovery.discoveredRules(),
     chg1h: cs.chg?.h1 ?? 0, chg24h: cs.chg?.h24 ?? 0, rs: env.rs, empirical: env.empirical, selected: (cs.prioReasons ?? []).slice(0, 3).map((r) => `ranked up by: ${r}`),
     vol24: coin.vol24, smart: smartMoneyProvider ? smartMoneyProvider(cs.symbol) : null, adj: [],
     shape: (e, st, tg) => riskLib.shapeTrade(e, st, tg, { symbol: cs.symbol, rank: coin.rank ?? 100 }),
@@ -304,7 +306,7 @@ function thinkAbout(cs, env) {
 
 const ACT_ORDER = { BUY: 0, SHORT: 0, SELL: 0, HOLD: 1, WATCH: 2, IGNORE: 3 };
 const compactRow = (d) => ({
-  symbol: d.symbol, name: d.name, price: d.price, action: d.action, verdict: d.verdict, side: d.side, cls: d.cls, score: d.score, scores: d.scores, mean: d.mean, pUp: d.pUp, pUpSource: d.pUpSource, pSample: d.pSample, ev: d.ev, setup: d.setup?.label ?? null, setupId: d.setup?.name ?? null,
+  rankInScan: d.rankInScan ?? null, eligibleCount: d.eligibleCount ?? null, symbol: d.symbol, name: d.name, price: d.price, action: d.action, verdict: d.verdict, side: d.side, cls: d.cls, score: d.score, scores: d.scores, mean: d.mean, floor: d.floor, confidence: d.confidence, evLB: d.evLB, cautions: (d.cautions ?? []).map((c) => c.text), penalties: (d.penalties ?? []).map((p) => `${p.text} (-${p.pts})`), pUp: d.pUp, pUpSource: d.pUpSource, pSample: d.pSample, ev: d.ev, setup: d.setup?.label ?? null, setupId: d.setup?.name ?? null,
   chase: d.chase ?? null, timing: d.timing ? { score: d.timing.score, insideZone: d.timing.insideZone, trigger: d.timing.trigger } : null, why: d.why ?? null, entryZone: d.entryZone ?? null, relStrength: d.relStrength ?? null, realisticR: d.realisticR ?? null, targetR: d.targetR ?? null, families: d.families ?? null,
   other: d.alt ? { side: d.alt.side, verdict: d.alt.verdict, scores: d.alt.scores, setup: d.alt.setup } : null,
   trend: d.evidence?.trend ?? null, flow: d.evidence?.flow ?? null, candles: d.evidence?.candles ?? [], volume: d.evidence?.volume ?? null, momentum: d.evidence?.momentum ?? null,
@@ -338,8 +340,10 @@ async function runBrain(ctxSources) {
   for (const cs of state.coins.values()) if (!cs.coin?.tradable) cs.brain = null;
 
   // rank: "which coins have the strongest probability of going up from this point?"
-  const rank = (a, b) => ACT_ORDER[a.action] - ACT_ORDER[b.action] || (b.ev ?? -9) - (a.ev ?? -9) || b.score - a.score;
+  // Eligible coins are RANKED against each other by their composite (then EV): a 65 can be taken when it is the strongest available, and only the best few are bought.
+  const rank = (a, b) => ACT_ORDER[a.action] - ACT_ORDER[b.action] || b.score - a.score || (b.ev ?? -9) - (a.ev ?? -9);
   decisions.sort(rank);
+  decisions.filter((d) => d.action === 'BUY').forEach((d, i, arr) => { d.rankInScan = i + 1; d.eligibleCount = arr.length; });
   const by = (cls) => decisions.filter((d) => d.cls === cls);
   const live1 = (d) => d.action === 'BUY' || d.action === 'SHORT';
   const opp = decisions.filter((d) => live1(d) || d.cls === 'HOT' || d.cls === 'SHORT' || d.action === 'WATCH').sort((a, b) => (live1(a) ? 0 : 1) - (live1(b) ? 0 : 1) || b.score - a.score || b.scores.direction - a.scores.direction);
@@ -399,6 +403,7 @@ async function considerBuys(env, buys) {
     if ([...state.positions.values()].some((p) => p.symbol === d.symbol) || [...state.pending.values()].some((p) => p.symbol === d.symbol)) continue;
     cs.evaluating = true;
     try {
+      if (Date.now() - (cs.coin.priceAt ?? 0) > 20 * 60_000) await refreshHot([cs.coin.id]).catch(() => {});      // market data older than 20 minutes is refreshed before deciding
       const fp = await feed.freshPrice(cs.coin.product, R.evalStaleMs);
       if (fp.price == null) { logDecision('skipped', d.symbol, `BUY held back: price stream not verified fresh (age ${Math.round(fp.ageMs / 1000)}s)`); continue; }
       cs.book = await fetchBook(cs.coin.product).catch(() => null);        // spread + depth are now part of the decision (illiquid book = veto)
@@ -525,29 +530,40 @@ function onCandleClosed(product, candle) {
     p.seen++;
     const closed = feed.closed1m(product);
     const avgVol = closed.slice(-21, -1).reduce((a, c) => a + c.v, 0) / Math.max(1, closed.slice(-21, -1).length);
-    const z = p.plan, bullish = candle.c > candle.o, volOk = avgVol === 0 || candle.v >= avgVol * 0.8;
-    // The confirmation must confirm the PLANNED entry: the close has to hold the level (not below the zone) and stay INSIDE the zone. A close beyond the zone is the market running away: that is chasing, not confirming.
-    const ranAway = !!z && candle.c > z.hi, heldLevel = z ? candle.c >= z.lo : candle.c > p.refPrice * 1.0005, aboveRef = heldLevel && !ranAway;
+    // The confirmation has to confirm the THESIS, not just be green: the close holds the level (not below the zone), sits in or just past the zone, volume is reasonable, and the stop is not violated.
+    // A bullish-ish close is enough (green, or closing in the upper half of its range): it does not have to be a perfect candle. A close far beyond the zone is the market running away, not a confirmation.
+    const z = p.plan, range = candle.h - candle.l, bullish = candle.c >= candle.o || (range > 0 && (candle.c - candle.l) / range >= 0.5), volOk = avgVol === 0 || candle.v >= avgVol * 0.6;
+    const near = z ? z.hi + 0.25 * (z.atr ?? 0) : Infinity, ranAway = !!z && candle.c > z.hi + config.brain.cancelBeyond * (z.atr ?? 0), heldLevel = z ? candle.c >= z.lo : candle.c > p.refPrice * 1.0005, aboveRef = heldLevel && candle.c <= near;
     if (p.decision?.stop != null && candle.l <= p.decision.stop) { failSignal(p, 'skipped', `setup invalidated: price traded through the planned stop ${p.decision.stop.toPrecision(6)} before confirming`); continue; }
     const confirmation = { candle_time: new Date(candle.t * 1000).toISOString(), o: candle.o, h: candle.h, l: candle.l, c: candle.c, v: candle.v, bullish, above_reference: aboveRef, volume_ok: volOk, candles_seen: p.seen };
-    if (ranAway) { failSignal(p, 'skipped', `not chasing: the 1m candle closed at ${candle.c} beyond the planned entry zone (top ${z.hi.toPrecision(6)}); the setup is re-evaluated on the next scan and needs a pullback / retest`, confirmation); continue; }
+    if (ranAway) { failSignal(p, 'skipped', `price moved materially away from the plan: the 1m candle closed at ${candle.c}, well beyond the entry zone (top ${z.hi.toPrecision(6)}); cancelled and recalculated on the next scan instead of chasing`, confirmation); continue; }
     if (bullish && aboveRef && volOk) {
       confirmation.passed = true;
       state.pending.delete(p.id);
       db.updateSignal(p.id, { status: 'confirmed', confirmed_at: new Date().toISOString(), confirmation });
       logDecision('confirmed', p.symbol, `candle confirmed the planned entry (close ${candle.c} inside the zone ${z ? z.lo.toPrecision(6) + '-' + z.hi.toPrecision(6) : 'n/a'}): running risk filters`);
       tryEnter(p, confirmation);
-    } else if (p.seen >= 3) {
-      confirmation.passed = false;
-      failSignal(p, 'confirmation_failed', `candle confirmation failed after ${p.seen} candles (last: ${bullish ? 'green' : 'red'}, ${aboveRef ? 'above' : 'not above'} reference, ${volOk ? 'volume ok' : 'volume weak'})`, confirmation);
-    }
+    }                                                              // otherwise keep waiting: the structure is reassessed when the window ends, not discarded after exactly 3 candles
   }
 }
 
 async function tryEnter(p, confirmation) {
   const cs = state.coins.get(p.symbol);
-  const d = p.decision;
+  let d = p.decision;
   try {
+    // Rules 59-63: recalculate the setup, the R:R and the scores from FRESH candles, a fresh order book and a fresh BTC / regime read, instead of trusting a plan made up to half an hour ago.
+    if (cs?.coin && state.brain.env) {
+      await analyzeCoin(cs.coin);
+      cs.book = await fetchBook(p.product).catch(() => null);
+      const btcCs = state.coins.get('BTC'); if (btcCs?.coin) await analyzeCoin(btcCs.coin);
+      const env = { ...state.brain.env, regime: brain.marketRegime({ btc: btcCs?.ta, eth: state.coins.get('ETH')?.ta, breadth: state.brain.env.regime?.breadth, btcGate: state.btc.bullish }) };
+      const d3 = thinkAbout(cs, env);
+      if (d3.action !== 'BUY') {
+        const why = `setup no longer valid when recalculated at entry (composite ${d3.score}, floor ${d3.floor}): ${d3.vetoes.map((v) => v.text).join('; ') || 'blocked'}`;
+        await db.updateSignal(p.id, { status: 'skipped', skip_reason: why }); logDecision('skipped', p.symbol, why); return;
+      }
+      d3.id = d.id; d = d3; p.decision = d3;
+    }
     const fp = await feed.freshPrice(p.product, R.staleMs);
     // Re-verify the BTC regime with fresh candles right before entering.
     let btc = state.btc;
@@ -557,11 +573,11 @@ async function tryEnter(p, confirmation) {
     const execReasons = [];
     if (fp.price == null) execReasons.push(`execution price stale (last trade ${Number.isFinite(fp.ageMs) ? Math.round(fp.ageMs / 1000) + 's' : 'unknown'} ago, max ${R.staleMs / 1000}s)`);
     else if (confirmation?.c > 0 && Math.abs(fp.price / confirmation.c - 1) > R.maxEntryDriftPct) execReasons.push(`execution price ${fp.price} is ${(Math.abs(fp.price / confirmation.c - 1) * 100).toFixed(2)}% away from the confirmed price ${confirmation.c} (max ${R.maxEntryDriftPct * 100}%)`);
-    if (d.entryZone && fp.price != null && fp.price > d.entryZone.hi) execReasons.push(`not chasing: execution price ${fp.price} is above the planned entry zone (top ${d.entryZone.hi.toPrecision(6)})`);
+    if (d.entryZone && fp.price != null && fp.price > d.entryZone.hi + 0.25 * (d.entryZone.atr ?? 0)) execReasons.push(`not chasing: execution price ${fp.price} is beyond the (recalculated) entry zone (top ${d.entryZone.hi.toPrecision(6)})`);
     // The Brain proposes the structural stop and target; risk.shapeTrade keeps the stop inside the coin's band (never wider than 4%) and re-prices R:R at the LIVE entry.
     const shaped = riskLib.shapeTrade(live, d.stop, d.target, { symbol: p.symbol, rank: cs?.coin?.rank ?? 100 });
     const reasons = riskLib.entryFilters({
-      signal: { direction: 'bullish' }, entry: live, shaped, scores: d.scores, btc: { ...btc, severe: !!state.brain.regime?.severe }, portfolio: state.portfolio,
+      signal: { direction: 'bullish' }, entry: live, shaped, composite: d.score, floor: d.floor, btc: { ...btc, severe: !!state.brain.regime?.severe }, portfolio: state.portfolio,
       openCount: state.positions.size, cooldownUntil: cs?.coin?.cooldownUntil, dataFresh: fp.price != null,
     });
     if (live <= shaped.stop) reasons.push('price already at/below the stop level');
@@ -1090,7 +1106,13 @@ async function learningCycle() {
 async function housekeeping() {
   const now = Date.now();
   for (const p of [...state.pending.values()]) {
-    if (now - p.createdAt > config.confirmWindowMs) failSignal(p, 'confirmation_failed', `no candle confirmation within ${config.confirmWindowMs / 60000} minutes`);
+    const z = p.plan, px = feed.price(p.product);
+    if (z && px != null && px > z.hi + config.brain.cancelBeyond * (z.atr ?? 0)) { failSignal(p, 'skipped', `price moved materially away from the planned entry (${px} vs zone top ${z.hi.toPrecision(6)}): cancelled and recalculated rather than chased`); continue; }
+    if (now - p.createdAt > config.confirmWindowMs) {
+      const intact = px != null && p.decision?.stop != null && px > p.decision.stop && (!z || (px >= z.lo && px <= z.hi + config.brain.zoneTolerance * (z.atr ?? 0)));
+      if (!p.reassessed && intact) { p.reassessed = true; p.createdAt = now; logDecision('info', p.symbol, 'confirmation window elapsed but the structure is intact and price is still in the zone: reassessed, waiting one more window'); }
+      else failSignal(p, 'confirmation_failed', `no candle confirmation within ${config.confirmWindowMs / 60000} minutes${p.reassessed ? ' (and one reassessment)' : ''}`);
+    }
   }
   // Stale-price fallback for open positions: never leave a position unmonitored.
   for (const pos of state.positions.values()) {
@@ -1113,7 +1135,7 @@ export function dataHealth() {
 /* --------------------------------------------------------------------- start */
 
 export async function start() {
-  learning.load(); learning.learnRules();
+  learning.load(); learning.learnRules(); discovery.loadDiscovered();
   const saved = await db.loadPortfolio();
   state.portfolio = saved ?? {
     id: 1, starting_capital: R.startingCapital, cash: R.startingCapital, equity: R.startingCapital, realized_pnl: 0,
@@ -1196,7 +1218,7 @@ function buildRisks() {
   }
   for (const x of b.market?.risks ?? []) add(x.severity, x.kind, `${x.text} [${x.source}]`);
   const danger = new Map();                                                    // one line per distinct event, listing the coins it blocks
-  for (const d of [...(b.avoid ?? []), ...(b.watch ?? []), ...(b.opportunities ?? [])]) { const v = d.vetoes.find((x) => x.startsWith('dangerous news')); if (v) danger.set(v, [...(danger.get(v) ?? []), d.symbol]); }
+  for (const d of [...(b.avoid ?? []), ...(b.watch ?? []), ...(b.opportunities ?? [])]) { const v = [...(d.cautions ?? []), ...d.vetoes].find((x) => x.startsWith('negative news') || x.startsWith('catastrophic')); if (v) danger.set(v, [...(danger.get(v) ?? []), d.symbol]); }
   for (const [v, syms] of danger) { const u = [...new Set(syms)]; add(0.55, 'news', `${v} (blocks ${u.slice(0, 6).join(', ')}${u.length > 6 ? ` +${u.length - 6} more` : ''})`); }
   const gate = riskLib.tradingGate(p); if (!gate.allowed) add(0.95, 'risk-control', `trading is blocked: ${gate.reason}`);
   const eq = markEquity(), dd = eq / p.daily_start_equity - 1;
@@ -1220,7 +1242,7 @@ function brainSnapshot() {
     positions: [...state.positions.values()].filter((x) => !x.copy && !x.venue).map((x) => ({ symbol: x.symbol, action: x.brain?.action ?? 'HOLD', reasons: x.brain?.reasons ?? ['waiting for the first structure read after the entry'], setup: x.ctx?.brain?.setup?.label ?? null, invalidation: x.brain?.invalidation ?? null })),
     funnel: state.funnel ?? null, mkt: state.mkt ?? null, shortsExecuted: config.brain.allowShortTrades,
     risks: buildRisks(), learning: learningReport(),
-    rules: { minDirection: Bc.minDirection, minTiming: Bc.minTiming, minGeometry: Bc.minGeometry, chaseVeto: Bc.chaseVeto, minScore: Bc.minScore, minPUp: Bc.minPUp, minEV: Bc.minEV, minRR: R.minRR, copyTrading: 'data input only (1% weight): can never open, size or veto a trade' },
+    rules: { minComposite: Bc.minComposite, weights: Bc.composite, chaseWarn: Bc.chaseWarn, chaseVeto: Bc.chaseVeto, minEV: Bc.minEV, evSeK: Bc.evSeK, dataMinN: Bc.dataMinN, discovered: discovery.discoveredRules().length, minRR: R.minRR, copyTrading: 'data input only (1% weight): can never open, size or veto a trade' },
   };
 }
 

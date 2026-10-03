@@ -16,7 +16,7 @@ for (const [name, mk] of [['1. Already pumped (chasing)', pumped], ['2. Fresh en
 if (json) console.log(JSON.stringify(out, null, 2));
 else for (const o of out) {
   console.log(`\n=== ${o.scenario}  [${o.history}]`);
-  console.log(`VERDICT ${o.verdict}   direction ${o.direction} | timing ${o.timing} | geometry ${o.geometry} | overall (weakest) ${o.overall}   24h move ${o.chg24h}%`);
+  console.log(`VERDICT ${o.verdict}   direction ${o.direction} | timing ${o.timing} | geometry ${o.geometry} | composite ${o.overall}   24h move ${o.chg24h}%`);
   console.log(`setup: ${o.setup ?? 'none'}   P(target first) ${(o.pUp * 100).toFixed(0)}%   EV ${o.ev ?? '-'}R   R:R ${o.rr ?? '-'}`);
   if (o.chase) console.log(`anti-chasing: ${o.chase.verdict} (score ${o.chase.score}): ${o.chase.moveAtr} ATR moved, ${o.chase.distLevelAtr} ATR from the level, ${(o.chase.used * 100).toFixed(0)}% of move used, volume spike spent: ${o.chase.spikeSpent}, stretched: ${o.chase.stretched}`);
   console.log(`blocked by: ${o.vetoes.join(', ') || 'nothing'}`);

@@ -45,21 +45,16 @@ export function tradingGate(p, now = Date.now()) {
 }
 
 /** All hard filters for a confirmed candidate. Returns every failing reason (for the decision log). */
-export function entryFilters({ signal, entry, shaped, scores, btc, portfolio, openCount, cooldownUntil, dataFresh, now = Date.now() }) {
+export function entryFilters({ signal, entry, shaped, composite, floor, btc, portfolio, openCount, cooldownUntil, dataFresh, now = Date.now() }) {
   const reasons = [];
   const gate = tradingGate(portfolio, now);
   if (!gate.allowed) reasons.push(`circuit breaker: ${gate.reason}`);
   if (!dataFresh) reasons.push('price data not verified fresh (<=10s)');
   if (btc.severe) reasons.push('severe market conditions (BTC crash / strong 4h+1h downtrend): long entries suspended');   // a bearish-but-not-severe BTC only lowers probability and size
   if (signal.direction !== 'bullish') reasons.push(`research direction is ${signal.direction}`);
-  // direction, timing and trade geometry must EACH pass on their own: a strong trend cannot buy a bad entry
-  const Bq = config.brain;
-  if (!scores) reasons.push('no direction / timing / geometry scores');
-  else {
-    if (scores.direction < Bq.minDirection) reasons.push(`direction ${scores.direction} < ${Bq.minDirection}`);
-    if (scores.timing < Bq.minTiming) reasons.push(`timing ${scores.timing} < ${Bq.minTiming}`);
-    if (scores.geometry < Bq.minGeometry) reasons.push(`trade geometry ${scores.geometry} < ${Bq.minGeometry}`);
-  }
+  // direction, timing and geometry are combined into ONE ranking score (a very weak part and chasing pull it down); it must clear the (regime-adjusted) floor
+  if (composite == null) reasons.push('no composite score');
+  else if (composite < (floor ?? config.brain.minComposite)) reasons.push(`composite ${composite} < ${floor ?? config.brain.minComposite}`);
   if (!(shaped.target > entry)) reasons.push('target is not above entry');
   else if (shaped.rr < R.minRR) reasons.push(`net R:R ${shaped.rr.toFixed(2)} < ${R.minRR}`);
   if (openCount >= R.maxOpenPositions) reasons.push(`already ${openCount} open positions (max ${R.maxOpenPositions})`);

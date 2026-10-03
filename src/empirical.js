@@ -72,7 +72,7 @@ export function buildModel(tables = hist?.tables ?? {}, live = [], opts = {}) {
     t.n++; o.reach.forEach((r, i) => { if (r) t.hits[i]++; });
   }
   const pooled = (dir) => { const acc = { n: 0, hits: LEVELS.map(() => 0) }; for (const [k, t] of T) if (k.startsWith(dir + ':')) { acc.n += t.n; t.hits.forEach((h, i) => { acc.hits[i] += h; }); } return acc; };
-  const KP = 25, KS = 15;       // pseudo-observations pulling pooled toward the no-edge prior, and a setup toward its pooled direction
+  const KP = 40, KS = 25;       // pseudo-observations pulling pooled toward the no-edge prior, and a setup toward its pooled direction (skeptical on purpose: real edges are rare)
   const poolP = {};
   for (const dir of ['long', 'short']) { const p = pooled(dir); poolP[dir] = { n: p.n, ps: LEVELS.map((L, i) => (p.hits[i] + KP * priorReach(L)) / (p.n + KP)) }; }
   return {

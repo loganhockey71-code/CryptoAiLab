@@ -75,12 +75,13 @@ export function fixtureModel(setups = ['breakout_retest', 'trend_pullback', 'ran
 }
 
 /** run the Brain on a market with coin-level inputs (1h / 24h change taken from the candles themselves) */
-export function decideOn(c5, { empirical, regime = regimeBull, rs, news = null } = {}) {
+export function decideOn(c5, { empirical, regime = regimeBull, rs, news = null, book = null, warnings = [], discovered = [], mutate = null } = {}) {
   const T = analyse(c5), h1 = T['1h'], m15 = T['15m'];
+  if (mutate) mutate(T);
   const price = h1.price, back = (n) => c5[Math.max(0, c5.length - 1 - n * 12)].c;
   const chg1h = price / back(1) - 1, chg24h = price / back(24) - 1;
   const d = brain.decide({
-    symbol: 'TEST', name: 'Test', ta: T, regime, news, market: null, book: null, chg1h, chg24h, rs: rs ?? { mkt1: 0.001, mkt24: 0.004, btc24: 0.006, eth24: 0.005 },
+    symbol: 'TEST', name: 'Test', ta: T, regime, news, market: null, book, warnings, discovered, chg1h, chg24h, rs: rs ?? { mkt1: 0.001, mkt24: 0.004, btc24: 0.006, eth24: 0.005 },
     smart: null, adj: [], empirical, selected: ['top of the relative-strength ranking'], shape: shape(), vol24: 5e7,
   });
   return { d, T, chg1h, chg24h, price };

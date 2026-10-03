@@ -37,6 +37,8 @@ const RULES = [
 
 // A headline that denies, doubts or speculates is not an event: "unaffected", "little chance", "could", "potential", a question mark... Hedged items are reported as 'uncertain', weak, and never trigger a veto.
 const HEDGE = /\b(unaffected|not affected|isn'?t affected|no (sign|risk|impact|evidence|chance)|little chance|low chance|denies|denied|dismiss(es|ed)? (rumou?rs?|reports?)|rul(e|es|ed) out|false|fake|rumou?rs?|speculat\w+|could|might|may|potential(ly)?|possible|possibly|would|ahead of|helped pioneer|former|expects?|odds|traders (now )?see|analysts? (say|expect|see)|plans? to|considering|weighs?|mulls?)\b|\bif\b|\?\s*$/i;
+// Coin-specific events severe enough to veto a trade on their own. Everything else negative only lowers the score.
+export const CATASTROPHIC = new Set(['hack', 'insolvency', 'delist', 'sec_action']);
 const escRe =(s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const MAJOR_ALIASES = { BTC: ['bitcoin', 'btc'], ETH: ['ethereum', 'ether', 'eth'], SOL: ['solana', 'sol'], XRP: ['xrp', 'ripple'], BNB: ['bnb', 'binance coin'], DOGE: ['dogecoin', 'doge'], ADA: ['cardano', 'ada'], AVAX: ['avalanche', 'avax'], LINK: ['chainlink', 'link'] };
 
@@ -113,7 +115,7 @@ export function pricedIn(event, sincePct, atrPct) {
  */
 export function coinImpact(events, coin, moveSince, atrPct, trust = () => 0.5) {
   const rel = events.filter((e) => e.scope === 'market' || e.coins.includes(coin.symbol));
-  let sum = 0, danger = null, bullish = null;
+  let sum = 0, danger = null, bullish = null, catastrophic = null;
   const used = rel.map((e) => {
     const d = decayed(e);
     const pi = e.publishedAt && moveSince ? pricedIn(e, moveSince(e.publishedAt), atrPct) : 'unknown';
@@ -124,10 +126,11 @@ export function coinImpact(events, coin, moveSince, atrPct, trust = () => 0.5) {
     const officialOrCorroborated = e.tier === 3 || (e.corroboratedBy ?? 0) >= 1;
     const canVeto = e.scope === 'market' ? d >= 0.55 && officialOrCorroborated : d >= 0.45;      // one unofficial headline can never veto the whole market
     if (e.dir < 0 && canVeto && !e.hedged && pi !== 'yes') danger = danger && danger.d >= d ? danger : { d, why: `${e.label}: "${e.what.slice(0, 90)}"` };
+    if (e.dir < 0 && CATASTROPHIC.has(e.rule) && e.scope === 'coin' && d >= 0.5 && !e.hedged && pi !== 'yes') catastrophic = catastrophic && catastrophic.d >= d ? catastrophic : { d, why: `${e.label}: "${e.what.slice(0, 90)}"` };
     if (e.dir > 0 && d >= 0.45 && !e.hedged && pi !== 'yes' && (e.scope === 'coin' || e.tier === 3)) bullish = bullish && bullish.d >= d ? bullish : { d, why: `${e.label}: "${e.what.slice(0, 90)}"` };
     return { rule: e.rule, trust: tr, what: e.what, label: e.label, scope: e.scope, direction: e.direction, strength: +d.toFixed(2), durationHours: e.durationHours, ageHours: e.ageHours, pricedIn: pi, source: e.source, tier: e.tier, effect: +contrib.toFixed(2) };
   }).filter((e) => e.strength > 0.05);
-  return { effect: +Math.max(-1, Math.min(1, sum)).toFixed(2), dangerous: !!danger, danger: danger?.why ?? null, bullishDanger: bullish?.why ?? null, events: used.sort((a, b) => Math.abs(b.effect) - Math.abs(a.effect)).slice(0, 6) };
+  return { effect: +Math.max(-1, Math.min(1, sum)).toFixed(2), dangerous: !!danger, danger: danger?.why ?? null, catastrophic: catastrophic?.why ?? null, bullishDanger: bullish?.why ?? null, events: used.sort((a, b) => Math.abs(b.effect) - Math.abs(a.effect)).slice(0, 6) };
 }
 
 /** Market-wide read: net direction of every market-scope event plus macro readings from FRED (oil, dollar, VIX, yields) when available. */
