@@ -902,7 +902,7 @@ export async function reducePosition(pos, fraction, price, reason) {
 
 /**
  * Open a PAPER position that mirrors a tracked trader. Every deterministic safety gate that makes sense for a copied trade applies:
- * circuit breakers, the shared max-3-positions cap, the 30%-of-equity size cap, asset cooldown, fresh-data check, fees + slippage and the hard stop.
+ * circuit breakers, the shared max-positions cap, the 30%-of-equity size cap, asset cooldown, fresh-data check, fees + slippage and the hard stop.
  * (The BTC-regime / confluence / R:R filters belong to the LLM strategy and do not apply: the trader's edge is the signal here.)
  */
 export async function openCopyPosition(o) {

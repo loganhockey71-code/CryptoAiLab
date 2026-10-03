@@ -61,7 +61,7 @@ export const config = {
     startingCapital: 2000,
     riskPerTradePct: 0.01,       // hard cap: a stopped-out trade (stop + fees + slippage) may lose at most 1% of equity. There is no minimum position size.
     maxPositionPct: 0.30,
-    maxOpenPositions: 3,
+    maxOpenPositions: 6,
     minComponent: 12,            // each of technical / volume / smart money / research must pass on its own (of 25)
     // Stop-loss distance by coin (fraction below entry). Every band is clamped to stopAbsMaxPct: NO stop is ever wider than 4%, on any pair or chain, memes included.
     stopBands: Object.freeze({ btc: [0.015, 0.02], eth: [0.02, 0.025], top20: [0.025, 0.03], mid: [0.03, 0.04], small: [0.04, 0.04], meme: [0.04, 0.04] }),

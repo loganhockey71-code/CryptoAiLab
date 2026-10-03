@@ -70,7 +70,7 @@ test('entry filter: the exploration minimum applies ONLY when passed; the protec
   assert.ok(ok(1.2, { minRR: X.minRR }).some((x) => /R:R/.test(x)));
   assert.ok(ok(2.0, { minRR: X.minRR, composite: 40 }).some((x) => /composite/.test(x)), 'the other gates still apply');
   assert.ok(ok(2.0, { minRR: X.minRR, btc: { severe: true } }).some((x) => /severe/.test(x)));
-  assert.ok(ok(2.0, { minRR: X.minRR, openCount: 3 }).some((x) => /already 3 open/.test(x)), 'the 3-position cap still applies');
+  assert.ok(ok(2.0, { minRR: X.minRR, openCount: config.risk.maxOpenPositions }).some((x) => /already [0-9]+ open/.test(x)), 'the position cap still applies');
 });
 
 test('exploration sizing: a stop-out loses at most the stated 0.10-0.25% of equity (costs included) and is never bigger than the normal cap', () => {
