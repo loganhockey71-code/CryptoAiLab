@@ -2,7 +2,7 @@
 // PAPER ONLY: this module never talks to any order endpoint. Positions are simulated in memory + Supabase.
 import { config, log, warn } from './config.js';
 import { db } from './db.js';
-import { feed, fetchCandles, loadProducts, fetchBook } from './exchange.js';
+import { feed, fetchCandles, loadProducts, loadGateMarkets, fetchBook } from './exchange.js';
 import { hl } from './hyperliquid.js';
 import { onchainPx } from './onchainprices.js';
 import { refreshUniverse, restoreCooldowns, universe, cgTrending, radar as radarState, watchOnlyMovers, refreshHot, refreshTail, cgStats } from './universe.js';
@@ -138,8 +138,9 @@ async function runScan() {
   try {
     if (Date.now() - state.productsAt > 3600_000 || !state.productSet.size) {
       state.productSet = await loadProducts(); state.productsAt = Date.now();
+      try { state.gateMarkets = await loadGateMarkets(); } catch (e) { warn('Gate.io markets unavailable (keeping the previous list):', e.message); }
     }
-    const changes = await refreshUniverse(state.productSet);
+    const changes = await refreshUniverse(state.productSet, state.gateMarkets ?? new Map());
     if (changes) {
       for (const id of changes.added) { const c = universe.coins.get(id); logDecision('info', c.symbol, `entered the tradable universe (market-cap rank #${c.cgRank})`); }
       for (const id of changes.removed) logDecision('info', id, 'dropped out of the tradable universe');
@@ -151,6 +152,7 @@ async function runScan() {
     const products = new Set(tradable.map((c) => c.product));
     for (const pos of state.positions.values()) if (pos.product) products.add(pos.product);
     feed.setProducts([...products]);
+    feed.setHot([...state.positions.values(), ...state.pending.values()].map((x) => x.product).filter(Boolean));
 
     // BTC first so the regime gate is current before anything else is evaluated.
     tradable.sort((a, b) => (a.symbol === 'BTC' ? -1 : b.symbol === 'BTC' ? 1 : a.cgRank - b.cgRank));
@@ -165,7 +167,7 @@ async function runScan() {
     hotSymbols = shortlist;
     state.shortlist = { size: shortlist.size, top: ranked.slice(0, 25).map(([sym, p]) => ({ symbol: sym, score: +p.score.toFixed(0), reasons: p.reasons })) };
     // The shortlist is refreshed with candles every scan; everyone else every tailEvery-th scan (staggered) and on first sight, so any coin can move up the queue.
-    const todo = tradable.filter((c, idx) => c.symbol === 'BTC' || shortlist.has(c.symbol) || !state.coins.get(c.symbol)?.snaps?.['1h'] || (idx + s.count) % U.tailEvery === 0)
+    const todo = tradable.filter((c, idx) => c.symbol === 'BTC' || shortlist.has(c.symbol) || (!radarLib.rejectReason(c) && ( !state.coins.get(c.symbol)?.snaps?.['1h'] || (idx + s.count) % U.tailEvery === 0)))
       .sort((a, b) => (a.symbol === 'BTC' ? -1 : b.symbol === 'BTC' ? 1 : (prio.get(b.symbol)?.score ?? 0) - (prio.get(a.symbol)?.score ?? 0)));
     let i = 0;
     for (const coin of todo) {
@@ -631,7 +633,7 @@ async function tryEnter(p, confirmation) {
     const row = await db.insertTrade({
       symbol: p.symbol, signal_id: p.id.startsWith('mem-') ? null : p.id, status: 'open', entry_price: entryPx, qty, notional,
       target_price: shaped.target, stop_price: stopPx, high_water: entryPx, rr: shaped.rr, confluence_score: d.score, rationale: why,
-      fee_entry: fee, entry_trigger: exploring ? 'brain_explore' : 'brain', prediction: { mode: p.mode ?? 'normal', xkind: p.mode === 'exploration' ? d.exploration?.kind ?? null : null, riskUsd: fin.riskUsd, expected_direction: 'up', decisionId: d.id ?? null, setup: d.setup.name, p_up: d.pUp, ev: d.ev, scores: d.scores, why: d.why, chase: d.chase, entryZone: d.entryZone, factors: d.factors, target: d.target, stop: d.stop, timeframe_hours: d.holdHours, confirmation, trigger: p.trigger ?? null, evidence: d.evidence },
+      fee_entry: fee, entry_trigger: exploring ? 'brain_explore' : 'brain', prediction: { product: p.product, mode: p.mode ?? 'normal', xkind: p.mode === 'exploration' ? d.exploration?.kind ?? null : null, riskUsd: fin.riskUsd, expected_direction: 'up', decisionId: d.id ?? null, setup: d.setup.name, p_up: d.pUp, ev: d.ev, scores: d.scores, why: d.why, chase: d.chase, entryZone: d.entryZone, factors: d.factors, target: d.target, stop: d.stop, timeframe_hours: d.holdHours, confirmation, trigger: p.trigger ?? null, evidence: d.evidence },
       evidence_used: d.reasons.join(' | '), expected_direction: 'up', confidence: d.pUp * 100,
       candle_pattern: `${(d.evidence?.candles ?? []).join(', ') || 'no clear pattern'}; 1m confirm close ${confirmation.c}`, market_regime: `${d.evidence?.regime ?? '?'}; BTC 1h ${btc.regime}`,
     });
@@ -1198,7 +1200,7 @@ export async function start() {
       highWater: Number(t.high_water ?? t.entry_price), openedAt: new Date(t.entry_time).getTime(), rationale: t.rationale, lastPrice: null,
       ...(isCopy
         ? { venue: t.source === 'copy_zerion' ? 'onchain' : 'hl', extra: t.prediction ?? null, coin: t.source === 'copy_zerion' ? (t.prediction?.assetKey ?? t.symbol) : t.symbol, leaderSize: Number(t.leader_size ?? 0), copy: { trader: t.source_trader, winRate: Number(t.confidence ?? 0) / 100, tier: t.prediction?.tier ?? 'minimum', leaderPx: Number(t.leader_fill_price), leaderTime: new Date(t.leader_fill_time).getTime(), k: Number(t.prediction?.k ?? 0), latencyMs: 0 } }
-        : { product: `${t.symbol}-USD`, mode: t.prediction?.mode ?? 'normal', xkind: t.prediction?.xkind ?? null, rrEntry: Number(t.rr) || undefined, riskUsd: Number(t.prediction?.riskUsd) || undefined, decisionId: t.prediction?.decisionId ?? null, lowWater: Number(t.entry_price), horizonHours: clampN(Number(t.prediction?.timeframe_hours) || 24, 1, 72), trigger: { kind: t.entry_trigger ?? 'scan', reasons: t.prediction?.trigger?.reasons ?? [] } }),
+        : { product: t.prediction?.product ?? `${t.symbol}-USD`, mode: t.prediction?.mode ?? 'normal', xkind: t.prediction?.xkind ?? null, rrEntry: Number(t.rr) || undefined, riskUsd: Number(t.prediction?.riskUsd) || undefined, decisionId: t.prediction?.decisionId ?? null, lowWater: Number(t.entry_price), horizonHours: clampN(Number(t.prediction?.timeframe_hours) || 24, 1, 72), trigger: { kind: t.entry_trigger ?? 'scan', reasons: t.prediction?.trigger?.reasons ?? [] } }),
       ctx: { conf: { notes: {}, technical: 0, rvol: 0, research: 0, derivatives: 0, total: Number(t.confluence_score ?? 0) }, sig: { evidenceSummary: t.evidence_used ?? '', supporting: [], conflicting: [], confidence: Number(t.confidence ?? 0) }, patterns: {}, btc: String(t.market_regime ?? '').split('BTC 1h ')[1] ?? t.market_regime,
         brain: !isCopy && t.prediction?.setup ? { setup: { name: t.prediction.setup, label: t.prediction.setup.replace(/_/g, ' ') }, score: Number(t.confluence_score ?? 0), pUp: Number(t.prediction.p_up ?? 0), ev: t.prediction.ev, rr: Number(t.rr ?? 0), holdHours: t.prediction.timeframe_hours, factors: t.prediction.factors ?? {}, reasons: String(t.evidence_used ?? '').split(' | '), evidence: t.prediction.evidence ?? {}, id: t.prediction.decisionId } : null },
     });

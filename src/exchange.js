@@ -1,4 +1,5 @@
-// READ-ONLY market data from Coinbase Exchange's public endpoints (no credentials, no order endpoints).
+// READ-ONLY market data from Coinbase Exchange's public endpoints (no credentials, no order endpoints). Coins with no Coinbase USD market are priced from Gate.io's public spot API
+// (also read-only, no key; product ids look like 'GATE:XYZ_USDT'); Binance is geo-blocked from the US and can be added as another venue later.
 import WebSocket from 'ws';
 import { EventEmitter } from 'node:events';
 import { log, warn } from './config.js';
@@ -26,6 +27,41 @@ async function get(path, attempt = 0) {
   });
 }
 
+/* ---- Gate.io public spot data (read-only). One throttled chain, ~8 requests/second. */
+const GATE_REST = 'https://api.gateio.ws/api/v4';
+let gchain = Promise.resolve();
+function gthrottled(fn) {
+  const p = gchain.then(fn, fn);
+  gchain = p.then(() => new Promise((r) => setTimeout(r, 125)), () => new Promise((r) => setTimeout(r, 125)));
+  return p;
+}
+async function gget(path, attempt = 0) {
+  return gthrottled(async () => {
+    const res = await fetch(GATE_REST + path, { headers: { 'User-Agent': 'crypto-ai-lab/1.0', Accept: 'application/json' }, signal: AbortSignal.timeout(15_000) });
+    if (res.status === 429 && attempt < 3) { await new Promise((r) => setTimeout(r, 2000 * (attempt + 1))); return gget(path, attempt + 1); }
+    if (!res.ok) throw new Error(`gate ${path} -> ${res.status}`);
+    return res.json();
+  });
+}
+export const isGate = (product) => typeof product === 'string' && product.startsWith('GATE:');
+const gpair = (product) => product.slice(5);
+const GATE_GRAN = { 60: '1m', 300: '5m', 900: '15m', 3600: '1h', 86400: '1d' };
+const LEVERAGED = /(3L|3S|5L|5S|UP|DOWN|BULL|BEAR)$/;
+
+/** Every tradable Gate.io USDT spot pair: base symbol -> { product, price, volUsd }. Leveraged tokens are skipped. */
+export async function loadGateMarkets() {
+  const [pairs, tickers] = await Promise.all([gget('/spot/currency_pairs'), gget('/spot/tickers')]);
+  const tk = new Map(tickers.map((t) => [t.currency_pair, t]));
+  const out = new Map();
+  for (const p of pairs) {
+    if (p.quote !== 'USDT' || p.trade_status !== 'tradable' || LEVERAGED.test(p.base)) continue;
+    const t = tk.get(p.id), price = Number(t?.last);
+    if (!(price > 0)) continue;
+    out.set(String(p.base).toUpperCase(), { product: `GATE:${p.id}`, price, volUsd: Number(t.quote_volume) || 0 });
+  }
+  return out;
+}
+
 export async function loadProducts() {
   const list = await get('/products');
   return new Set(list.filter((p) => p.quote_currency === 'USD' && p.status === 'online' && !p.trading_disabled).map((p) => p.id));
@@ -33,11 +69,20 @@ export async function loadProducts() {
 
 // Coinbase candle rows: [time, low, high, open, close, volume], newest first.
 export async function fetchCandles(product, granularity) {
+  if (isGate(product)) {
+    const iv = GATE_GRAN[granularity]; if (!iv) throw new Error(`unsupported granularity ${granularity}`);
+    const rows = await gget(`/spot/candlesticks?currency_pair=${gpair(product)}&interval=${iv}&limit=300`);
+    return rows.map((r) => ({ t: Number(r[0]), o: Number(r[5]), h: Number(r[3]), l: Number(r[4]), c: Number(r[2]), v: Number(r[6]) })).sort((a, b) => a.t - b.t);   // [t, quoteVol, close, high, low, open, baseVol, closed]
+  }
   const rows = await get(`/products/${product}/candles?granularity=${granularity}`);
   return rows.map(([t, l, h, o, c, v]) => ({ t, o, h, l, c, v })).sort((a, b) => a.t - b.t);
 }
 
 export async function fetchTicker(product) {
+  if (isGate(product)) {
+    const t = await gget(`/spot/tickers?currency_pair=${gpair(product)}`);
+    return { price: Number(t[0]?.last), time: Date.now() };       // Gate gives no trade timestamp: the age is the request time (a fresh REST read)
+  }
   const t = await get(`/products/${product}/ticker`);
   return { price: Number(t.price), time: new Date(t.time).getTime() };
 }
@@ -48,7 +93,7 @@ export async function fetchTicker(product) {
  * `depthUsd` is the resting notional within 0.5% / 1% of the mid price. `levels` is how many price levels each side has.
  */
 export async function fetchBook(product) {
-  const b = await get(`/products/${product}/book?level=2`);
+  const b = isGate(product) ? await gget(`/spot/order_book?currency_pair=${gpair(product)}&limit=100`) : await get(`/products/${product}/book?level=2`);
   const bids = (b.bids ?? []).map(([p, s]) => [Number(p), Number(s)]), asks = (b.asks ?? []).map(([p, s]) => [Number(p), Number(s)]);
   if (!bids.length || !asks.length) return null;
   const bid = bids[0][0], ask = asks[0][0], mid = (bid + ask) / 2;
@@ -66,7 +111,9 @@ class Feed extends EventEmitter {
   constructor() {
     super();
     this.live = new Map();      // product -> { price, tickTime, candle, closed: [] }
-    this.products = new Set();
+    this.products = new Set();      // Coinbase products (WebSocket)
+    this.gateProducts = new Set();  // Gate.io products (REST polling)
+    this.hot = new Set();           // Gate products with an open position or a pending entry: their 1m candles are polled
     this.lastMessageAt = 0;
     this.ws = null;
     this.retry = 0;
@@ -75,7 +122,12 @@ class Feed extends EventEmitter {
   get connected() { return this.ws?.readyState === WebSocket.OPEN; }
   feedAgeMs() { return this.lastMessageAt ? Date.now() - this.lastMessageAt : Infinity; }
 
-  setProducts(ids) {
+  setHot(ids) { this.hot = new Set([...ids].filter(isGate)); }
+
+  setProducts(all) {
+    this.gateProducts = new Set([...all].filter(isGate));
+    for (const p of [...this.live.keys()]) if (isGate(p) && !this.gateProducts.has(p)) this.live.delete(p);
+    const ids = [...all].filter((p) => !isGate(p));
     const next = new Set(ids);
     const added = [...next].filter((p) => !this.products.has(p));
     const removed = [...this.products].filter((p) => !next.has(p));
@@ -87,7 +139,30 @@ class Feed extends EventEmitter {
     for (const p of removed) this.live.delete(p);
   }
 
+  /** Gate.io has no ticker stream here: one bulk REST call refreshes every subscribed coin; the 1m candles of coins we hold or are about to enter are polled separately so closes and volume are real. */
+  startGatePolling() {
+    if (this.gateTimer) return;
+    this.gateTimer = setInterval(async () => {
+      if (!this.gateProducts.size) return;
+      try {
+        const rows = await gget('/spot/tickers'), now = Date.now();
+        for (const t of rows) { const product = `GATE:${t.currency_pair}`; const price = Number(t.last); if (this.gateProducts.has(product) && price > 0) this.onTick({ product_id: product, price, time: new Date(now).toISOString(), last_size: 0 }, true); }
+      } catch (e) { warn('gate tickers', e.message); }
+    }, 5000);
+    this.gateCandleTimer = setInterval(async () => {
+      for (const product of this.hot) {
+        try {
+          const rows = await fetchCandles(product, 60), cur = Math.floor(Date.now() / 60_000) * 60;
+          let s = this.live.get(product); if (!s) continue;
+          const closed = rows.filter((c) => c.t < cur), last = s.closed.length ? s.closed[s.closed.length - 1].t : 0;
+          for (const c of closed) if (c.t > last) { s.closed.push(c); if (s.closed.length > 300) s.closed.shift(); this.emit('candle', product, c); }
+        } catch (e) { warn('gate 1m', product, e.message); }
+      }
+    }, 15_000);
+  }
+
   start() {
+    this.startGatePolling();
     const ws = new WebSocket(WS_URL);
     this.ws = ws;
     ws.on('open', () => {
@@ -112,7 +187,7 @@ class Feed extends EventEmitter {
     ws.on('error', (e) => { warn('Coinbase WS error:', e.message); try { ws.terminate(); } catch {} });
   }
 
-  onTick(m) {
+  onTick(m, noClose = false) {
     const product = m.product_id, price = Number(m.price), size = Number(m.last_size) || 0;
     const time = m.time ? new Date(m.time).getTime() : Date.now();
     let s = this.live.get(product);
@@ -120,7 +195,7 @@ class Feed extends EventEmitter {
     s.price = price; s.tickTime = time;
     const bucket = Math.floor(time / 60_000) * 60;
     if (!s.candle || s.candle.t !== bucket) {
-      if (s.candle && bucket > s.candle.t) {
+      if (s.candle && bucket > s.candle.t && !noClose) {
         s.closed.push(s.candle);
         if (s.closed.length > 300) s.closed.shift();
         this.emit('candle', product, s.candle);
@@ -135,6 +210,7 @@ class Feed extends EventEmitter {
 
   // Seed the closed-candle buffer from REST so indicators work immediately.
   async backfill1m(product) {
+    if (isGate(product)) this.hot.add(product);
     try {
       const rows = await fetchCandles(product, 60);
       let s = this.live.get(product);

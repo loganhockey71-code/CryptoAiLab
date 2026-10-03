@@ -209,7 +209,7 @@ export async function refreshTail(hotIds) {
 }
 
 /** Every online Coinbase USD market that CoinGecko can identify (and that is not a stablecoin / wrapped token), best market cap first. */
-export async function refreshUniverse(productSet) {
+export async function refreshUniverse(productSet, gateMarkets = new Map()) {
   if (!radar.rows.size) {
     await sweepRadar(1, 3);                                      // the first 750 coins cover nearly every Coinbase market: start fast...
     if (radar.rows.size) sweepRadar(radar.nextPage ?? 4).catch((e) => warn('radar sweep', e.message));   // ...then finish the full sweep in the background (the scan never waits for it)
@@ -228,8 +228,11 @@ export async function refreshUniverse(productSet) {
   for (const r of markets) r.tradable = false;
   for (const c of markets) {
     const symbol = c.symbol;
-    const product = `${symbol}-USD`;
-    const reason = nonTradableReason({ name: c.name, symbol, current_price: c.price }) || (productSet.has(product) ? null : 'no Coinbase USD market') || (seenSymbols.has(symbol) ? 'duplicate symbol' : null);
+    // Coinbase USD first (WebSocket feed, deepest books); otherwise Gate.io USDT. A same-ticker coin priced very differently on Gate is a different asset: never mapped.
+    const cb = `${symbol}-USD`, g = gateMarkets.get(String(symbol).toUpperCase());
+    const gateOk = g && c.price > 0 && Math.abs(g.price / c.price - 1) <= 0.3;
+    const product = productSet.has(cb) ? cb : gateOk ? g.product : null;
+    const reason = nonTradableReason({ name: c.name, symbol, current_price: c.price }) || (product ? null : g ? 'ticker clash: Gate.io lists a differently priced coin under this symbol' : 'no Coinbase USD or Gate.io USDT market') || (seenSymbols.has(symbol) ? 'duplicate symbol' : null);
     if (reason) continue;                         // not tradable here: stays on the radar as watch-only
     seenSymbols.add(symbol); tradeRank++;
     c.tradable = true;
@@ -242,7 +245,7 @@ export async function refreshUniverse(productSet) {
     const prior = universe.coins.get(c.id);
     const coin = {
       id: c.id, symbol, name: c.name, rank: tradeRank, cgRank: c.cgRank, cmcRank, discrepancy, discrepancyNote: note,
-      marketCap: c.mcap, mcap: c.mcap, price: c.price, priceAt: c.at, volume24h: c.vol24 ?? 0, vol24: c.vol24, chg1h: c.chg1h, chg24h: c.chg24h, chg7d: c.chg7d, prev: c.prev, product,
+      marketCap: c.mcap, mcap: c.mcap, price: c.price, priceAt: c.at, volume24h: c.vol24 ?? 0, vol24: c.vol24, chg1h: c.chg1h, chg24h: c.chg24h, chg7d: c.chg7d, prev: c.prev, product, venue: product.startsWith('GATE:') ? 'gate' : 'coinbase',
       tradable: true, excludedReason: null,
       cooldownUntil: prior?.cooldownUntil ?? null,
     };
@@ -258,10 +261,10 @@ export async function refreshUniverse(productSet) {
   const removed = [...prevIds].filter((id) => !next.has(id));
   universe.coins = next;
   universe.updatedAt = Date.now();
-  universe.coinbaseMarkets = productSet.size;
+  universe.coinbaseMarkets = productSet.size; universe.gateMarkets = gateMarkets.size;
   if (!prevIds.size || added.length || removed.length || Date.now() - (universe.dbAt ?? 0) > 3600_000) { universe.dbAt = Date.now(); await db.upsertCoins(rows); await db.deactivateCoins(removed); }
   if (prevIds.size) { if (added.length || removed.length) log(`Universe refreshed: +${added.length} added, -${removed.length} removed (${next.size} tradable coins)`); }
-  else log(`Universe loaded: ${next.size} tradable coins of ${radar.rows.size} monitored (${productSet.size} Coinbase USD markets)`);
+  else log(`Universe loaded: ${next.size} tradable coins of ${radar.rows.size} monitored (${productSet.size} Coinbase USD markets, ${gateMarkets.size} Gate.io USDT markets)`);
   return { added: prevIds.size ? added : [], removed };
 }
 
