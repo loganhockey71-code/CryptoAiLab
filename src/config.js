@@ -101,6 +101,10 @@ export const config = {
     // penalty) so a strong trend still cannot buy a terrible entry. A coin is eligible when its composite clears minComposite (tightened in a weak BTC regime, relaxed for exceptional relative
     // strength) AND its EV is meaningfully positive AND the protected R:R / stop rules hold. Eligible coins are RANKED against each other each scan and the best few are taken.
     composite: Object.freeze({ wDirection: 0.35, wTiming: 0.30, wGeometry: 0.35, weakBelow: 35, weakPenalty: 0.8, chasePenaltyFrom: 0.5, chasePenalty: 25 }), minComposite: 55,
+    // EXPLORATION MODE (paper only): a setup that fails ONLY the protected 2.5R requirement may be traded at TINY risk so its real expectancy can be measured. The EV test is waived for it (EV is computed at the
+    // lower R:R, so it is the same requirement seen from the other side, and requiring it would make the experiment impossible). Every other rule (vetoes, composite floor, stop cap, circuit breakers, cooldown, fresh price, position cap) still applies. Outcomes are tracked separately; the normal rules (including the 2.5R minimum) change only by a human decision
+    // after enough exploration trades show positive expectancy. minRR is a sanity floor for what counts as an exploration setup (1.5R net).
+    explore: Object.freeze({ enabled: true, minRR: 1.5, riskMin: 0.001, riskMax: 0.0025, maxOpen: 2, reserveSlots: 1, prelimTrades: 50, decisiveTrades: 100, bucketMin: 15, budgetPct: 0.02 }),     // budgetPct: exploration pauses itself once its closed trades have lost 2% of the starting capital
     zoneTolerance: 0.5,                      // price up to this many ATRs beyond the planned zone: the zone is RECALCULATED around the live price instead of giving up
     cancelBeyond: 1.0,                       // a pending entry is cancelled (and recalculated next scan) when price runs this many ATRs past the zone: never chased
     chaseWarn: 0.4, chaseVeto: 0.6,          // anti-chasing score (0 fresh .. 1 fully chased): a PENALTY on timing and composite, never an automatic rejection

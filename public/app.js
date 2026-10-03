@@ -115,7 +115,7 @@ function renderPositions(s) {
   const pend = s.pending.map((p) => `<div class="item"><div class="meta"><b>${esc(p.symbol)}</b><span class="pill amber">awaiting candle confirmation</span><span>ref ${price(p.refPrice)}</span><span>score ${p.score}</span><span>${ago(p.createdAt)}</span></div></div>`).join('');
   if (!s.positions.length && !pend) { el.innerHTML = '<div class="empty">100% cash. No open paper positions.</div>'; return; }
   el.innerHTML = s.positions.map((p) => `<div class="item" data-sym="${esc(p.symbol)}" style="cursor:pointer">
-    <div class="meta"><b>${esc(p.symbol)}</b><span class="pill ${p.side === 'short' ? 'bad' : 'good'}">${esc(p.side)}</span>${p.source === 'copy' ? '' : `<span class="pill own" title="${esc((p.trigger?.reasons || []).join(', '))}">AI ANALYSIS${p.trigger?.kind === 'mover' ? ' · mover' : ''}</span>`}${p.source === 'copy' ? `<span class="pill amber" title="${esc(p.trader)}">copy ${p.venue === 'onchain' ? 'on-chain ' : ''}${esc(p.trader.slice(0, 8))} · ${(p.traderWinRate * 100).toFixed(0)}% win rate</span>` : ''}<span>entry ${price(p.entry)}</span>${p.leaderPx ? `<span>leader ${price(p.leaderPx)}</span>` : ''}<span>now ${price(p.price)}</span>${p.target ? `<span>target ${price(p.target)}</span>` : ''}<span>${p.source === 'copy' ? 'hard stop' : 'stop'} ${price(p.stop)}</span>${p.trailing ? `<span>trail ${price(p.trailing)}</span>` : ''}${p.rr != null ? `<span>R:R ${p.rr.toFixed(2)}</span>` : ''}<span>${money(p.notional)}</span></div>
+    <div class="meta"><b>${esc(p.symbol)}</b><span class="pill ${p.side === 'short' ? 'bad' : 'good'}">${esc(p.side)}</span>${p.source === 'copy' ? '' : `<span class="pill own" title="${esc((p.trigger?.reasons || []).join(', '))}">${p.mode === 'exploration' ? 'EXPLORATION (tiny risk)' : 'AI ANALYSIS'}${p.trigger?.kind === 'mover' ? ' · mover' : ''}</span>`}${p.source === 'copy' ? `<span class="pill amber" title="${esc(p.trader)}">copy ${p.venue === 'onchain' ? 'on-chain ' : ''}${esc(p.trader.slice(0, 8))} · ${(p.traderWinRate * 100).toFixed(0)}% win rate</span>` : ''}<span>entry ${price(p.entry)}</span>${p.leaderPx ? `<span>leader ${price(p.leaderPx)}</span>` : ''}<span>now ${price(p.price)}</span>${p.target ? `<span>target ${price(p.target)}</span>` : ''}<span>${p.source === 'copy' ? 'hard stop' : 'stop'} ${price(p.stop)}</span>${p.trailing ? `<span>trail ${price(p.trailing)}</span>` : ''}${p.rr != null ? `<span>R:R ${p.rr.toFixed(2)}</span>` : ''}<span>${money(p.notional)}</span></div>
     <div><b class="${cls(p.pnl)}">${money(p.pnl)} (${pct(p.pnlPct)})</b> <span class="muted">net of fees/slippage · opened ${ago(p.openedAt)}</span></div>
     <div class="why"><b>Why it entered:</b> ${esc(p.why)}</div></div>`).join('') + pend;
 }
@@ -143,7 +143,7 @@ function renderReflections(s) {
 
 const reasonLabel = { brain_sell: 'AI SELL: structure broke', stop_loss: 'hit stop-loss', downtrend_exit: 'downtrend: cut early', trailing_stop: 'trailing stop', momentum_reversal: 'momentum reversed', leader_exit: 'trader exited', leader_flip: 'trader flipped', leader_exit_while_offline: 'trader exited (offline)', circuit_breaker_daily_loss: 'daily loss cap' };
 const sourceLabel = (t) => (t.source === 'copy_hyperliquid' ? `copy · Hyperliquid ${t.trader ? t.trader.slice(0, 6) : ''}` : t.source === 'copy_zerion' ? `copy · on-chain ${t.trader ? t.trader.slice(0, 6) : ''}` : 'LLM strategy');
-const typePill = (t) => (t.origin === 'mimic'
+const typePill = (t) => (t.mode === 'exploration' ? `<span class="pill amber">EXPLORATION</span> <span class="muted">lower R:R test, tiny risk</span>` : t.origin === 'mimic'
   ? `<span class="pill amber">MIMIC</span> <span class="muted">${esc(sourceLabel(t).replace('copy · ', ''))}</span>`
   : `<span class="pill own">OWN IDEA</span> <span class="muted" title="${esc((t.triggerReasons || []).join(', '))}">${t.trigger === 'brain' ? 'AI analysis' : t.trigger === 'mover' ? 'trending / unusual mover' : 'regular scan'}</span>`);
 const held = (a, b) => { const m = Math.max(0, (b - a) / 60000); return m < 90 ? `${m.toFixed(0)}m` : m < 2880 ? `${(m / 60).toFixed(1)}h` : `${(m / 1440).toFixed(1)}d`; };
@@ -270,7 +270,7 @@ function oppCard(o) {
   const lv = (x) => (x == null ? '—' : price(x));
   const sc = o.scores || {};
   return `<div class="opp ${live ? 'buy' : ''}" data-sym="${esc(o.symbol)}">
-    <h4>${esc(o.symbol)} <span class="muted" style="font-weight:400">${esc(o.name)}</span> ${verdictPill(o)}${clsPill(o.cls)}${o.setup ? `<span class="pill own">${esc(o.setup)}</span>` : ''}
+    <h4>${esc(o.symbol)} <span class="muted" style="font-weight:400">${esc(o.name)}</span> ${verdictPill(o)}${clsPill(o.cls)}${o.setup ? `<span class="pill own">${esc(o.setup)}</span>` : ''}${o.exploration ? `<span class="pill amber" title="${esc(o.exploration.reason)}">EXPLORATION · risk ${(o.exploration.riskPct * 100).toFixed(2)}%</span>` : ''}
       <span class="big"><b>${o.score}</b> composite (floor ${o.floor ?? '—'})<br>P(target first) ${(o.pUp * 100).toFixed(0)}% · EV ${o.ev == null ? '—' : o.ev + 'R'}${o.evLB != null ? ` (lower bound ${o.evLB}R)` : ''}<br>data confidence ${o.confidence == null ? '—' : (o.confidence * 100).toFixed(0) + '%'}</span></h4>
     <div class="scs">${scoreBar('Direction', sc.direction)}${scoreBar('Timing', sc.timing)}${scoreBar('Geometry', sc.geometry)}</div>
     <div class="facts">
@@ -294,6 +294,17 @@ function oppCard(o) {
   </div>`;
 }
 
+function explorationHtml(x) {
+  if (!x || !x.enabled) return '';
+  const bar = `<div class="sc ${x.progress >= 0.5 ? 'ok' : 'low'}" style="max-width:420px"><span>progress</span><b>${x.n} / ${x.targetDecisive}</b><i><u style="width:${Math.round(x.progress * 100)}%"></u><s style="left:${Math.round(100 * x.targetPrelim / x.targetDecisive)}%"></s></i></div>`;
+  return `<h3>Exploration mode (paper, tiny ${(x.risk.min * 100).toFixed(2)}–${(x.risk.max * 100).toFixed(2)}% risk): do setups that fail ONLY the 2.5R rule have positive expectancy?</h3>
+    ${bar}<p class="muted">Marker = ${x.targetPrelim} trades (preliminary). The normal rules, including the protected 2.5R minimum, change only by a human decision after this evidence.</p>
+    <p><span class="pill ${/^positive/.test(x.verdict) ? 'good' : /^negative/.test(x.verdict) ? 'bad' : 'amber'}">${esc(x.verdict)}</span> ${esc(x.text)}</p>
+    <p class="muted">Exploration P&amp;L so far: <b class="${cls(x.pnlUsd)}">${money(x.pnlUsd)}</b> (self-stops at -2% of starting capital) · open exploration positions: ${x.open ?? 0}${x.paused ? ` · <span class="down">PAUSED: ${esc(x.paused)}</span>` : ' · active'}</p>
+    ${x.n ? `<p>closed ${x.n} · win rate ${(x.winRate * 100).toFixed(0)}% · expectancy <b class="${cls(x.avgR)}">${x.avgR}R</b> (95%: ${x.lower95 ?? '—'} to ${x.upper95 ?? '—'}) · total ${x.totalR}R · profit factor ${x.profitFactor ?? '—'} · avg best ${pct(x.avgMfe)} / worst ${pct(x.avgMae)}</p>
+    <table class="mini"><thead><tr><th>Net R:R at entry</th><th class="r">n</th><th class="r">Win</th><th class="r">Expectancy</th><th class="r">95% bounds</th><th>Evidence</th></tr></thead><tbody>${x.buckets.map((b) => `<tr><td>${b.label}</td><td class="r">${b.n}</td><td class="r">${b.n ? (b.winRate * 100).toFixed(0) + '%' : '—'}</td><td class="r ${cls(b.avgR)}">${b.n ? b.avgR + 'R' : '—'}</td><td class="r">${b.n > 1 ? b.lower95 + ' / ' + b.upper95 : '—'}</td><td class="muted">${b.positive ? 'positive on its own' : b.n < 15 ? 'needs 15+' : 'not demonstrated'}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">No exploration trade has closed yet.</p>'}`;
+}
+
 function renderLearning(L, rules, positions) {
   if (!L) return;
   const st = (x) => (x && x.n ? `${x.n} measured · win rate ${(x.winRate * 100).toFixed(0)}% · avg ${x.avgR >= 0 ? '+' : ''}${x.avgR}R · target first ${(x.targetFirst * 100).toFixed(0)}% · avg best ${pct(x.avgMfe)} / worst ${pct(x.avgMae)}` : 'none measured yet');
@@ -302,6 +313,7 @@ function renderLearning(L, rules, positions) {
   $('#learning').innerHTML = `<div class="rep">
     ${L.sufficiency && L.sufficiency.length ? L.sufficiency.map((n) => `<p class="note">⚠ ${esc(n)}</p>`).join('') : ''}
     <p class="muted">Entry rules in force: direction, timing and geometry are blended into ONE composite and coins are RANKED against each other (weights ${rules.weights.wDirection}/${rules.weights.wTiming}/${rules.weights.wGeometry}; a very weak part and chasing pull it down). A coin needs a composite above its floor (${rules.minComposite}, tighter in a weak BTC regime, looser for exceptional relative strength), EV ≥ ${rules.minEV}R <b>and</b> still positive after allowing for estimate uncertainty (${rules.evSeK} standard errors), the protected net R:R ≥ ${rules.minRR} and stop ≤ 4%, no real veto (severe market, catastrophic coin news, extreme downtrend with no reversal, extremely thin book, no volatility), and some trigger. ${rules.discovered} discovered setups loaded. Tracked traders: ${esc(rules.copyTrading)}.</p>
+    ${explorationHtml(L.exploration)}
     <h3>Open positions: HOLD / SELL</h3>${positions && positions.length ? positions.map((p) => `<p><b>${esc(p.symbol)}</b> <span class="pill ${p.action === 'SELL' ? 'bad' : 'good'}">${esc(p.action)}</span> ${esc(p.reasons[0] || '')}${p.invalidation ? ` <span class="muted">(thesis breaks below ${price(p.invalidation)})</span>` : ''}</p>`).join('') : '<p class="muted">No open positions.</p>'}
     <h3>Real paper trades</h3><p>${st(L.trades)}</p>
     <h3>Counterfactuals: every setup AND every coin the brain declined, measured from real candles</h3>

@@ -45,7 +45,7 @@ export function tradingGate(p, now = Date.now()) {
 }
 
 /** All hard filters for a confirmed candidate. Returns every failing reason (for the decision log). */
-export function entryFilters({ signal, entry, shaped, composite, floor, btc, portfolio, openCount, cooldownUntil, dataFresh, now = Date.now() }) {
+export function entryFilters({ signal, entry, shaped, composite, floor, minRR = R.minRR, btc, portfolio, openCount, cooldownUntil, dataFresh, now = Date.now() }) {
   const reasons = [];
   const gate = tradingGate(portfolio, now);
   if (!gate.allowed) reasons.push(`circuit breaker: ${gate.reason}`);
@@ -56,11 +56,14 @@ export function entryFilters({ signal, entry, shaped, composite, floor, btc, por
   if (composite == null) reasons.push('no composite score');
   else if (composite < (floor ?? config.brain.minComposite)) reasons.push(`composite ${composite} < ${floor ?? config.brain.minComposite}`);
   if (!(shaped.target > entry)) reasons.push('target is not above entry');
-  else if (shaped.rr < R.minRR) reasons.push(`net R:R ${shaped.rr.toFixed(2)} < ${R.minRR}`);
+  else if (shaped.rr < minRR) reasons.push(`net R:R ${shaped.rr.toFixed(2)} < ${minRR}`);
   if (openCount >= R.maxOpenPositions) reasons.push(`already ${openCount} open positions (max ${R.maxOpenPositions})`);
   if (cooldownUntil && cooldownUntil > now) reasons.push(`asset cooldown after stop-loss until ${new Date(cooldownUntil).toISOString()}`);
   return reasons;
 }
+
+/** Exploration sizing: the notional whose stop-out loses `riskPct` of equity INCLUDING round-trip costs, never above the normal cap (so it can only be smaller than a normal trade). */
+export const explorationNotional = (equity, riskPct, stopDist, cap) => Math.max(0, Math.min(cap, (equity * riskPct) / (stopDist + ROUND_TRIP_COST_PCT)));
 
 /** Costs for one execution side (entry or exit). */
 export const entryFill = (px) => px * (1 + R.slippagePct);

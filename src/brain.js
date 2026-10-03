@@ -514,6 +514,16 @@ function evaluate(side, inp, T) {
   };
   if (!why.now.length && action === 'BUY') action = 'WATCH';       // safety net: never trade without a "why now"
 
+  // EXPLORATION: eligible only when the protected 2.5R requirement is the SOLE thing in the way (no real veto, composite floor met, a why-now exists) and the net R:R is at least the sanity floor.
+  // The EV test is waived: it is computed at the lower R:R, so it is the same shortfall seen from the other side (and a model that says "negative" is exactly what the experiment must be able to test).
+  // Risk is tiny (0.10% - 0.25% of equity), larger for a higher composite. Paper only; the normal rules are untouched.
+  const X = B.explore;
+  let exploration = null;
+  if (long && X.enabled && action === 'WATCH' && best && shaped && vetoes.some((v) => v.code === 'poor_rr') && vetoes.every((v) => v.code === 'poor_rr' || v.code === 'low_ev') && rrNet >= X.minRR && why.now.length) {
+    const t = clamp((composite - floor) / 20, 0, 1);
+    exploration = { eligible: true, riskPct: +(X.riskMin + (X.riskMax - X.riskMin) * t).toFixed(5), rr: +rrNet.toFixed(2), reason: `fails only the protected ${R.minRR}R requirement (net R:R ${rrNet.toFixed(2)}${ev != null && ev < B.minEV ? `; its modelled EV is ${ev}R, which the experiment exists to test` : ''}); every other gate passed` };
+  }
+
   const waitingFor = [];
   if (action !== 'BUY' && action !== 'SHORT') {
     const codes = new Set([...vetoes, ...cautions].map((v) => v.code));
@@ -534,7 +544,7 @@ function evaluate(side, inp, T) {
     score, mean: +mean.toFixed(1), floor, scores, pUp: pUp ?? 0, pUpSource: emp ? emp.source : 'no setup', pSample: emp?.n ?? 0, confidence, ev, evLB, evSE, setup: best ? { name: best.name, label: best.label, quality: +best.quality.toFixed(2), reversal: !!best.reversal, discovered: !!best.discovered } : null,
     entry: shaped ? price : null, stop: shaped?.stop ?? null, target: shaped?.target ?? null, rr: rrNet != null ? +rrNet.toFixed(2) : null, stopDist: shaped?.stopDist ?? null, holdHours,
     entryZone: zone ? { lo: zone.lo, hi: zone.hi, level: zone.level, planned: zone.planned, atr: zone.atr, recalculated: !!zone.recalculated } : null, maxEntry: zone ? (long ? zone.hi : zone.lo) : null,
-    chase, timing, why, realisticR, targetR: rTarget != null ? +rTarget.toFixed(2) : null, riskMult: reg.riskMult ?? 1, setupsFound: setups.map((x) => x.name),
+    chase, timing, why, realisticR, targetR: rTarget != null ? +rTarget.toFixed(2) : null, riskMult: reg.riskMult ?? 1, setupsFound: setups.map((x) => x.name), exploration,
     reasons, vetoes, cautions, penalties: pens, waitingFor, blocked: vetoes.map((v) => v.text), adjustments: inp.adj ?? [],
     factors: { ...Object.fromEntries(Object.entries(fam).map(([k, v]) => [k, +v.toFixed(2)])), context: +ctxFam.toFixed(2) }, families: { agree, count: agree.length },
     relStrength: { vs1h: +rel.vs1h.toFixed(4), vsBTC24: +rel.vsBTC24.toFixed(4), vsETH24: +rel.vsETH24.toFixed(4), vsMkt24: +rel.vsMkt24.toFixed(4) },

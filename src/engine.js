@@ -306,7 +306,7 @@ function thinkAbout(cs, env) {
 
 const ACT_ORDER = { BUY: 0, SHORT: 0, SELL: 0, HOLD: 1, WATCH: 2, IGNORE: 3 };
 const compactRow = (d) => ({
-  rankInScan: d.rankInScan ?? null, eligibleCount: d.eligibleCount ?? null, symbol: d.symbol, name: d.name, price: d.price, action: d.action, verdict: d.verdict, side: d.side, cls: d.cls, score: d.score, scores: d.scores, mean: d.mean, floor: d.floor, confidence: d.confidence, evLB: d.evLB, cautions: (d.cautions ?? []).map((c) => c.text), penalties: (d.penalties ?? []).map((p) => `${p.text} (-${p.pts})`), pUp: d.pUp, pUpSource: d.pUpSource, pSample: d.pSample, ev: d.ev, setup: d.setup?.label ?? null, setupId: d.setup?.name ?? null,
+  exploration: d.exploration ?? null, rankInScan: d.rankInScan ?? null, eligibleCount: d.eligibleCount ?? null, symbol: d.symbol, name: d.name, price: d.price, action: d.action, verdict: d.verdict, side: d.side, cls: d.cls, score: d.score, scores: d.scores, mean: d.mean, floor: d.floor, confidence: d.confidence, evLB: d.evLB, cautions: (d.cautions ?? []).map((c) => c.text), penalties: (d.penalties ?? []).map((p) => `${p.text} (-${p.pts})`), pUp: d.pUp, pUpSource: d.pUpSource, pSample: d.pSample, ev: d.ev, setup: d.setup?.label ?? null, setupId: d.setup?.name ?? null,
   chase: d.chase ?? null, timing: d.timing ? { score: d.timing.score, insideZone: d.timing.insideZone, trigger: d.timing.trigger } : null, why: d.why ?? null, entryZone: d.entryZone ?? null, relStrength: d.relStrength ?? null, realisticR: d.realisticR ?? null, targetR: d.targetR ?? null, families: d.families ?? null,
   other: d.alt ? { side: d.alt.side, verdict: d.alt.verdict, scores: d.alt.scores, setup: d.alt.setup } : null,
   trend: d.evidence?.trend ?? null, flow: d.evidence?.flow ?? null, candles: d.evidence?.candles ?? [], volume: d.evidence?.volume ?? null, momentum: d.evidence?.momentum ?? null,
@@ -384,18 +384,36 @@ async function runBrain(ctxSources) {
   const buys = decisions.filter((d) => d.action === 'BUY'), shorts = decisions.filter((d) => d.action === 'SHORT');
   logDecision('info', '*', `brain: ${decisions.length} coins analysed · regime ${regime.label.replace(/_/g, ' ')} (${regime.score}${regime.severe ? ', SEVERE' : ''}) · ${state.brain.counts.BUY} LONG, ${state.brain.counts.SHORT} SHORT, ${state.brain.counts.WAIT} WAIT, ${state.brain.counts.AVOID} AVOID · ${events.length} news events read${buys.length ? ` · LONG: ${buys.map((d) => d.symbol).join(', ')}` : ' · no entry with a good price right now: waiting'}${shorts.length ? ` · SHORT setups (detected, not executed: allowShortTrades=${config.brain.allowShortTrades}): ${shorts.map((d) => d.symbol).join(', ')}` : ''}`);
   await considerBuys(env, buys);
+  if (config.brain.explore.enabled) {
+    const explorers = decisions.filter((d) => d.exploration?.eligible).sort((a, b) => b.score - a.score);
+    if (explorers.length) logDecision('info', '*', `exploration: ${explorers.length} setup(s) fail ONLY the protected ${R.minRR}R requirement: ${explorers.slice(0, 5).map((d) => `${d.symbol} (R:R ${d.exploration.rr}, risk ${(d.exploration.riskPct * 100).toFixed(2)}%)`).join(', ')}`);
+    await considerBuys(env, explorers, { explore: true });
+  }
 }
 
 /** Turn BUY decisions into pending signals (candle confirmation + execution-price checks still follow in onCandleClosed / tryEnter). */
-async function considerBuys(env, buys) {
+/** Exploration pauses itself (a) when its closed trades have used the loss budget, (b) once 50+ closed trades show the lower-R:R setups LOSE after costs. Open exploration positions keep their normal exits. */
+export function explorationPause() {
+  const X = config.brain.explore, rep = learningReport().exploration;
+  if (!X.enabled) return 'disabled';
+  if (rep.pnlUsd <= -X.budgetPct * R.startingCapital) return `loss budget used: exploration trades are ${rep.pnlUsd.toFixed(2)} (limit -${(X.budgetPct * 100).toFixed(0)}% of the starting capital)`;
+  if (rep.n >= X.prelimTrades && /^negative/.test(rep.verdict)) return `the evidence is already negative after ${rep.n} trades: lower-R:R setups lose money after costs`;
+  return null;
+}
+
+async function considerBuys(env, buys, opts = {}) {
+  const explore = !!opts.explore, X = config.brain.explore;
   if (!buys.length) return;
+  if (explore) { const paused = explorationPause(); if (paused) { if (!state.brain.explorePausedLogged) logDecision('info', '*', `exploration paused: ${paused}`); state.brain.explorePausedLogged = true; return; } state.brain.explorePausedLogged = false; }
   const gate = riskLib.tradingGate(state.portfolio);
   if (!gate.allowed) { logDecision('skipped', '*', `trading blocked: ${gate.reason}`); return; }
   if (state.brain.regime?.severe) { logDecision('skipped', 'BTC', `severe market conditions (${state.brain.regime.notes.slice(-1)[0]}): ${buys.length} LONG decision(s) held back`); return; }
   const now = Date.now();
   let made = 0;
   for (const d of buys) {
-    if (state.positions.size + state.pending.size >= R.maxOpenPositions) { logDecision('skipped', '*', `${state.positions.size + state.pending.size} positions/pending signals already (max ${R.maxOpenPositions})`); return; }
+    const slots = state.positions.size + state.pending.size;
+    if (slots >= R.maxOpenPositions - (explore ? X.reserveSlots : 0)) { if (!explore) logDecision('skipped', '*', `${slots} positions/pending signals already (max ${R.maxOpenPositions})`); return; }
+    if (explore && [...state.positions.values(), ...state.pending.values()].filter((x) => (x.mode ?? x.decision?.mode) === 'exploration').length >= X.maxOpen) return;      // exploration never uses the last slot and is capped
     if (made >= config.brain.maxBuysPerScan) return;
     const cs = state.coins.get(d.symbol);
     if (!cs?.coin?.product || cs.evaluating) continue;
@@ -408,7 +426,8 @@ async function considerBuys(env, buys) {
       if (fp.price == null) { logDecision('skipped', d.symbol, `BUY held back: price stream not verified fresh (age ${Math.round(fp.ageMs / 1000)}s)`); continue; }
       cs.book = await fetchBook(cs.coin.product).catch(() => null);        // spread + depth are now part of the decision (illiquid book = veto)
       const d2 = cs.book ? thinkAbout(cs, env) : d;
-      if (d2.action !== 'BUY') { logDecision('skipped', d.symbol, `BUY withdrawn after the order-book check: ${d2.vetoes.map((v) => v.text).join('; ')}`); continue; }
+      if (explore ? !d2.exploration?.eligible : d2.action !== 'BUY') { logDecision('skipped', d.symbol, `${explore ? 'exploration' : 'BUY'} withdrawn after the order-book check: ${d2.vetoes.map((v) => v.text).join('; ')}`); continue; }
+      d2.mode = explore ? 'exploration' : 'normal';
       if (config.brain.llmReview) {
         const heads = state.newsFeed.items.slice(0, 18).map((i) => `${i.title.slice(0, 140)} [${i.source}, tier ${i.tier}]`);
         const rv = await reviewDecision(d2, heads).catch(() => null);
@@ -418,11 +437,11 @@ async function considerBuys(env, buys) {
       const row = await db.insertSignal({
         symbol: d.symbol, source_timestamp: new Date().toISOString(), direction: 'bullish', confidence: d2.pUp * 100, reference_price: fp.price, target_price: d2.target, stop_price: d2.stop,
         evidence_summary: d2.reasons.slice(0, 3).join(' | '), evidence: { brain: compactRow(d2), events: env.events.slice(0, 8) }, confluence: { total: d2.score, factors: d2.factors }, confluence_score: d2.score, btc_regime: state.btc.regime,
-        prediction: { expected_direction: 'up', setup: d2.setup?.name, p_up: d2.pUp, ev: d2.ev, target: d2.target, stop: d2.stop, timeframe_hours: d2.holdHours, made_at: new Date().toISOString(), reference_price: fp.price }, status: 'awaiting_confirmation',
+        prediction: { mode: d2.mode, expected_direction: 'up', setup: d2.setup?.name, p_up: d2.pUp, ev: d2.ev, target: d2.target, stop: d2.stop, timeframe_hours: d2.holdHours, made_at: new Date().toISOString(), reference_price: fp.price }, status: 'awaiting_confirmation',
       });
       const id = row?.id ?? `mem-${now}-${d.symbol}`;
-      state.pending.set(id, { id, symbol: d.symbol, product: cs.coin.product, refPrice: fp.price, createdAt: Date.now(), decision: d2, plan: d2.entryZone, trigger: { kind: 'brain', reasons: (d2.why?.now ?? d2.reasons).slice(0, 2) }, seen: 0 });
-      logDecision('candidate', d.symbol, `LONG idea (${d2.setup.label}): direction ${d2.scores.direction} / timing ${d2.scores.timing} / geometry ${d2.scores.geometry}, P(target first) ${(d2.pUp * 100).toFixed(0)}% (${d2.pUpSource}), EV ${d2.ev}R, R:R ${d2.rr}, hold ~${d2.holdHours}h. WHY NOW: ${(d2.why?.now ?? []).join('; ')}. Waiting for a 1m candle that confirms INSIDE the entry zone ${d2.entryZone.lo.toPrecision(6)}-${d2.entryZone.hi.toPrecision(6)} (a close beyond it is chasing).`);
+      state.pending.set(id, { id, symbol: d.symbol, mode: d2.mode, product: cs.coin.product, refPrice: fp.price, createdAt: Date.now(), decision: d2, plan: d2.entryZone, trigger: { kind: 'brain', reasons: (d2.why?.now ?? d2.reasons).slice(0, 2) }, seen: 0 });
+      logDecision('candidate', d.symbol, `${explore ? `EXPLORATION idea at ${(d2.exploration.riskPct * 100).toFixed(2)}% risk (fails only the 2.5R rule)` : 'LONG idea'} (${d2.setup.label}): direction ${d2.scores.direction} / timing ${d2.scores.timing} / geometry ${d2.scores.geometry}, P(target first) ${(d2.pUp * 100).toFixed(0)}% (${d2.pUpSource}), EV ${d2.ev}R, R:R ${d2.rr}, hold ~${d2.holdHours}h. WHY NOW: ${(d2.why?.now ?? []).join('; ')}. Waiting for a 1m candle that confirms INSIDE the entry zone ${d2.entryZone.lo.toPrecision(6)}-${d2.entryZone.hi.toPrecision(6)} (a close beyond it is chasing).`);
       feed.backfill1m(cs.coin.product);
       made++;
     } finally { cs.evaluating = false; }
@@ -558,11 +577,12 @@ async function tryEnter(p, confirmation) {
       const btcCs = state.coins.get('BTC'); if (btcCs?.coin) await analyzeCoin(btcCs.coin);
       const env = { ...state.brain.env, regime: brain.marketRegime({ btc: btcCs?.ta, eth: state.coins.get('ETH')?.ta, breadth: state.brain.env.regime?.breadth, btcGate: state.btc.bullish }) };
       const d3 = thinkAbout(cs, env);
-      if (d3.action !== 'BUY') {
+      const okNow = p.mode === 'exploration' ? !!d3.exploration?.eligible : d3.action === 'BUY';
+      if (!okNow) {
         const why = `setup no longer valid when recalculated at entry (composite ${d3.score}, floor ${d3.floor}): ${d3.vetoes.map((v) => v.text).join('; ') || 'blocked'}`;
         await db.updateSignal(p.id, { status: 'skipped', skip_reason: why }); logDecision('skipped', p.symbol, why); return;
       }
-      d3.id = d.id; d = d3; p.decision = d3;
+      d3.id = d.id; d3.mode = p.mode ?? 'normal'; d = d3; p.decision = d3;
     }
     const fp = await feed.freshPrice(p.product, R.staleMs);
     // Re-verify the BTC regime with fresh candles right before entering.
@@ -577,7 +597,7 @@ async function tryEnter(p, confirmation) {
     // The Brain proposes the structural stop and target; risk.shapeTrade keeps the stop inside the coin's band (never wider than 4%) and re-prices R:R at the LIVE entry.
     const shaped = riskLib.shapeTrade(live, d.stop, d.target, { symbol: p.symbol, rank: cs?.coin?.rank ?? 100 });
     const reasons = riskLib.entryFilters({
-      signal: { direction: 'bullish' }, entry: live, shaped, composite: d.score, floor: d.floor, btc: { ...btc, severe: !!state.brain.regime?.severe }, portfolio: state.portfolio,
+      signal: { direction: 'bullish' }, entry: live, shaped, composite: d.score, floor: d.floor, minRR: p.mode === 'exploration' ? config.brain.explore.minRR : undefined, btc: { ...btc, severe: !!state.brain.regime?.severe }, portfolio: state.portfolio,
       openCount: state.positions.size, cooldownUntil: cs?.coin?.cooldownUntil, dataFresh: fp.price != null,
     });
     if (live <= shaped.stop) reasons.push('price already at/below the stop level');
@@ -595,7 +615,11 @@ async function tryEnter(p, confirmation) {
     // Exploration sizing: until the Brain has 30+ measured own trades with a positive average R, it risks only half the normal 1% (smaller than the cap, never larger).
     const lr = learningReport(), proven = lr.trades.n >= config.brain.exploreMinTrades && lr.trades.avgR > 0;
     // Size can only go DOWN from the 1%-risk cap: half size while exploring, times the regime multiplier (bearish-but-not-severe market 0.6x, neutral 0.85x).
-    const wanted = guard.maxNotionalFor(equity, shaped.stopDist) * (proven ? 1 : config.brain.exploreRiskFraction) * Math.min(1, d.riskMult ?? 1);
+    const exploring = p.mode === 'exploration';
+    // Exploration risks only 0.10% - 0.25% of equity: notional = equity x risk% / (stop% + round-trip costs). It can only be SMALLER than the normal cap, never larger.
+    const wanted = exploring
+      ? riskLib.explorationNotional(equity, d.exploration.riskPct, shaped.stopDist, guard.maxNotionalFor(equity, shaped.stopDist)) * Math.min(1, d.riskMult ?? 1)
+      : guard.maxNotionalFor(equity, shaped.stopDist) * (proven ? 1 : config.brain.exploreRiskFraction) * Math.min(1, d.riskMult ?? 1);
     const fin = guard.finalizeEntry({ side: 'long', equity, cash: state.portfolio.cash, entry: entryPx, stop: shaped.stop, wanted });
     if (!fin.ok || fin.notional < 10) {
       const why = !fin.ok ? fin.reasons.join('; ') : `risk-based size $${fin.notional.toFixed(2)} is below the $10 minimum order (or insufficient cash)`;
@@ -603,26 +627,26 @@ async function tryEnter(p, confirmation) {
     }
     const sizePct = fin.notional / equity, stopPx = fin.stop;
     const qty = fin.notional / entryPx, notional = qty * entryPx, fee = riskLib.feeOn(notional);
-    const why = `${d.setup.label}. WHY NOW: ${(d.why?.now ?? []).join('; ')}. ${d.reasons.slice(0, 2).join(' · ')}. Direction ${d.scores.direction} / timing ${d.scores.timing} / geometry ${d.scores.geometry}, P(target before stop) ${(d.pUp * 100).toFixed(0)}% (${d.pUpSource}), EV ${d.ev}R, net R:R ${shaped.rr.toFixed(2)}, planned hold ~${d.holdHours}h. BTC 1h ${btc.regime}; candle confirmed.${proven ? '' : ` Exploration size (${config.brain.exploreRiskFraction}x risk): the edge is not yet proven by measured outcomes.`}`;
+    const why = `${exploring ? `EXPLORATION (${(d.exploration.riskPct * 100).toFixed(2)}% risk, net R:R ${shaped.rr.toFixed(2)} < the normal 2.5 minimum, measured separately). ` : ''}${d.setup.label}. WHY NOW: ${(d.why?.now ?? []).join('; ')}. ${d.reasons.slice(0, 2).join(' · ')}. Direction ${d.scores.direction} / timing ${d.scores.timing} / geometry ${d.scores.geometry}, P(target before stop) ${(d.pUp * 100).toFixed(0)}% (${d.pUpSource}), EV ${d.ev}R, net R:R ${shaped.rr.toFixed(2)}, planned hold ~${d.holdHours}h. BTC 1h ${btc.regime}; candle confirmed.${proven ? '' : ` Exploration size (${config.brain.exploreRiskFraction}x risk): the edge is not yet proven by measured outcomes.`}`;
     const row = await db.insertTrade({
       symbol: p.symbol, signal_id: p.id.startsWith('mem-') ? null : p.id, status: 'open', entry_price: entryPx, qty, notional,
       target_price: shaped.target, stop_price: stopPx, high_water: entryPx, rr: shaped.rr, confluence_score: d.score, rationale: why,
-      fee_entry: fee, entry_trigger: 'brain', prediction: { expected_direction: 'up', decisionId: d.id ?? null, setup: d.setup.name, p_up: d.pUp, ev: d.ev, scores: d.scores, why: d.why, chase: d.chase, entryZone: d.entryZone, factors: d.factors, target: d.target, stop: d.stop, timeframe_hours: d.holdHours, confirmation, trigger: p.trigger ?? null, evidence: d.evidence },
+      fee_entry: fee, entry_trigger: exploring ? 'brain_explore' : 'brain', prediction: { mode: p.mode ?? 'normal', riskUsd: fin.riskUsd, expected_direction: 'up', decisionId: d.id ?? null, setup: d.setup.name, p_up: d.pUp, ev: d.ev, scores: d.scores, why: d.why, chase: d.chase, entryZone: d.entryZone, factors: d.factors, target: d.target, stop: d.stop, timeframe_hours: d.holdHours, confirmation, trigger: p.trigger ?? null, evidence: d.evidence },
       evidence_used: d.reasons.join(' | '), expected_direction: 'up', confidence: d.pUp * 100,
       candle_pattern: `${(d.evidence?.candles ?? []).join(', ') || 'no clear pattern'}; 1m confirm close ${confirmation.c}`, market_regime: `${d.evidence?.regime ?? '?'}; BTC 1h ${btc.regime}`,
     });
     const id = row?.id ?? `mem-trade-${Date.now()}`;
-    if (d.id) learning.attachTrade(d.id, id);
+    if (d.id) learning.attachTrade(d.id, id, p.mode ?? 'normal');
     state.portfolio.cash -= notional + fee;
     state.positions.set(id, {
-      id, symbol: p.symbol, product: p.product, signalId: p.id, decisionId: d.id ?? null, qty, entry: entryPx, notional, fee, stop: stopPx, stopPct: fin.stopPct, riskUsd: fin.riskUsd, target: shaped.target, band: shaped.band, partialTaken: false, horizonHours: clampN(d.holdHours ?? 24, 1, 72),
+      id, symbol: p.symbol, mode: p.mode ?? 'normal', rrEntry: shaped.rr, product: p.product, signalId: p.id, decisionId: d.id ?? null, qty, entry: entryPx, notional, fee, stop: stopPx, stopPct: fin.stopPct, riskUsd: fin.riskUsd, target: shaped.target, band: shaped.band, partialTaken: false, horizonHours: clampN(d.holdHours ?? 24, 1, 72),
       trailing: null, highWater: entryPx, lowWater: entryPx, openedAt: Date.now(), rationale: why, lastPrice: live, sizePct, trigger: p.trigger ?? { kind: 'brain', reasons: [] },
       ctx: { brain: d, btc: btc.regime, confirmation, regime: d.evidence?.regime },
     });
     await db.updateSignal(p.id, { status: 'entered', trade_id: row?.id ?? null, rr: shaped.rr });
     persistPortfolio(true);
     feed.backfill1m(p.product);
-    logDecision('entered', p.symbol, `PAPER LONG ${qty.toPrecision(5)} @ ${entryPx.toPrecision(6)} ($${notional.toFixed(0)}, ${pct(sizePct)} of equity) stop ${stopPx.toPrecision(6)} (${pct(fin.stopPct)}) risk $${fin.riskUsd.toFixed(2)} (${pct(fin.riskUsd / equity)} of equity) target ${shaped.target.toPrecision(6)} · ${d.setup.label}`);
+    logDecision('entered', p.symbol, `${exploring ? 'EXPLORATION ' : ''}PAPER LONG ${qty.toPrecision(5)} @ ${entryPx.toPrecision(6)} ($${notional.toFixed(0)}, ${pct(sizePct)} of equity) stop ${stopPx.toPrecision(6)} (${pct(fin.stopPct)}) risk $${fin.riskUsd.toFixed(2)} (${pct(fin.riskUsd / equity)} of equity) target ${shaped.target.toPrecision(6)} · ${d.setup.label}`);
   } catch (e) {
     warn('tryEnter failed', p.symbol, e.message);
     await failSignal(p, 'skipped', `entry error: ${e.message}`);
@@ -731,7 +755,7 @@ function historyFromDb(t) {
     id: t.id, symbol: t.symbol, side: t.side ?? 'long', source: t.source ?? 'strategy', trader: t.source_trader ?? null,
     entry: Number(t.entry_price), exit: Number(t.exit_price), notional: Number(t.final_pnl_pct) ? Math.abs(Number(t.final_pnl) / Number(t.final_pnl_pct)) : Number(t.notional), pnl: Number(t.final_pnl), pnlPct: Number(t.final_pnl_pct),
     reason: t.exit_reason, openedAt: new Date(t.entry_time).getTime(), closedAt: new Date(t.exit_time).getTime(),
-    origin: String(t.source ?? '').startsWith('copy_') ? 'mimic' : 'own', trigger: t.entry_trigger ?? null, triggerReasons: t.prediction?.trigger?.reasons ?? [],
+    origin: String(t.source ?? '').startsWith('copy_') ? 'mimic' : 'own', trigger: t.entry_trigger ?? null, triggerReasons: t.prediction?.trigger?.reasons ?? [], mode: t.prediction?.mode ?? 'normal',
   };
 }
 
@@ -740,7 +764,7 @@ function recordHistory(pos, trade, notional) {
     id: pos.id, symbol: pos.symbol, side: pos.side ?? 'long', source: sourceOf(pos), trader: pos.copy?.trader ?? null,
     entry: pos.entry, exit: trade.exit_price, notional, pnl: trade.final_pnl, pnlPct: trade.final_pnl_pct, reason: trade.exit_reason,
     openedAt: pos.openedAt, closedAt: Date.now(),
-    origin: pos.copy ? 'mimic' : 'own', trigger: pos.trigger?.kind ?? null, triggerReasons: pos.trigger?.reasons ?? [],
+    origin: pos.copy ? 'mimic' : 'own', trigger: pos.trigger?.kind ?? null, triggerReasons: pos.trigger?.reasons ?? [], mode: pos.mode ?? 'normal',
   });
   if (state.recentClosed.length > 200) state.recentClosed.length = 200;
 }
@@ -749,9 +773,11 @@ function historySummary() {
   const all = state.recentClosed;
   const wins = all.filter((t) => t.pnl > 0), losses = all.filter((t) => t.pnl <= 0);
   const sum = (a) => a.reduce((x, t) => x + t.pnl, 0);
+  const modeGroup = (m) => { const g = all.filter((t) => (t.mode ?? 'normal') === m && t.origin === 'own'); return { count: g.length, wins: g.filter((t) => t.pnl > 0).length, losses: g.filter((t) => t.pnl <= 0).length, net: sum(g) }; };
   const group = (o) => { const g = all.filter((t) => t.origin === o); return { count: g.length, wins: g.filter((t) => t.pnl > 0).length, losses: g.filter((t) => t.pnl <= 0).length, net: sum(g) }; };
   return {
     byOrigin: { own: group('own'), mimic: group('mimic') },
+    byMode: { exploration: modeGroup('exploration'), normal: modeGroup('normal') },
     trades: all.slice(0, 60).map((t) => ({ ...t, result: t.pnl > 0 ? 'win' : 'loss' })),
     stats: {
       count: all.length, wins: wins.length, losses: losses.length, winRate: all.length ? wins.length / all.length : null, net: sum(all),
@@ -1049,7 +1075,7 @@ async function reflect(pos, trade, actual) {
   const hours = (Date.now() - pos.openedAt) / 3600_000;
   const m = { mfe: favourable(pos), mae: pos.side === 'short' ? 0 : (pos.lowWater ?? pos.entry) / pos.entry - 1, hours };
   const pm = postMortem(pos, trade, m);
-  if (pos.decisionId) learning.closeTrade(pos.id, { exitReason: trade.exit_reason, pnl: trade.final_pnl, pnlPct: trade.final_pnl_pct, mfe: m.mfe, mae: m.mae, hours, why: pm.why.join('; ') });
+  if (pos.decisionId) learning.closeTrade(pos.id, { exitReason: trade.exit_reason, pnl: trade.final_pnl, pnlPct: trade.final_pnl_pct, R: pos.riskUsd > 0 ? trade.final_pnl / pos.riskUsd : undefined, rr: pos.rrEntry, mfe: m.mfe, mae: m.mae, hours, why: pm.why.join('; ') });
   let r = null;
   if (llmUsable() && pos.ctx?.brain) {
     r = await reflectOnTrade({ ...trade, holdMinutes: +(hours * 60).toFixed(1) }, { decision: { setup: pos.ctx.brain.setup, score: pos.ctx.brain.score, pUp: pos.ctx.brain.pUp, factors: pos.ctx.brain.factors, reasons: pos.ctx.brain.reasons, evidence: pos.ctx.brain.evidence }, measured: { ...m, why: pm.why, right: pm.right, wrong: pm.wrong }, entryRationale: pos.rationale }, lessons);
@@ -1172,7 +1198,7 @@ export async function start() {
       highWater: Number(t.high_water ?? t.entry_price), openedAt: new Date(t.entry_time).getTime(), rationale: t.rationale, lastPrice: null,
       ...(isCopy
         ? { venue: t.source === 'copy_zerion' ? 'onchain' : 'hl', extra: t.prediction ?? null, coin: t.source === 'copy_zerion' ? (t.prediction?.assetKey ?? t.symbol) : t.symbol, leaderSize: Number(t.leader_size ?? 0), copy: { trader: t.source_trader, winRate: Number(t.confidence ?? 0) / 100, tier: t.prediction?.tier ?? 'minimum', leaderPx: Number(t.leader_fill_price), leaderTime: new Date(t.leader_fill_time).getTime(), k: Number(t.prediction?.k ?? 0), latencyMs: 0 } }
-        : { product: `${t.symbol}-USD`, decisionId: t.prediction?.decisionId ?? null, lowWater: Number(t.entry_price), horizonHours: clampN(Number(t.prediction?.timeframe_hours) || 24, 1, 72), trigger: { kind: t.entry_trigger ?? 'scan', reasons: t.prediction?.trigger?.reasons ?? [] } }),
+        : { product: `${t.symbol}-USD`, mode: t.prediction?.mode ?? 'normal', rrEntry: Number(t.rr) || undefined, riskUsd: Number(t.prediction?.riskUsd) || undefined, decisionId: t.prediction?.decisionId ?? null, lowWater: Number(t.entry_price), horizonHours: clampN(Number(t.prediction?.timeframe_hours) || 24, 1, 72), trigger: { kind: t.entry_trigger ?? 'scan', reasons: t.prediction?.trigger?.reasons ?? [] } }),
       ctx: { conf: { notes: {}, technical: 0, rvol: 0, research: 0, derivatives: 0, total: Number(t.confluence_score ?? 0) }, sig: { evidenceSummary: t.evidence_used ?? '', supporting: [], conflicting: [], confidence: Number(t.confidence ?? 0) }, patterns: {}, btc: String(t.market_regime ?? '').split('BTC 1h ')[1] ?? t.market_regime,
         brain: !isCopy && t.prediction?.setup ? { setup: { name: t.prediction.setup, label: t.prediction.setup.replace(/_/g, ' ') }, score: Number(t.confluence_score ?? 0), pUp: Number(t.prediction.p_up ?? 0), ev: t.prediction.ev, rr: Number(t.rr ?? 0), holdHours: t.prediction.timeframe_hours, factors: t.prediction.factors ?? {}, reasons: String(t.evidence_used ?? '').split(' | '), evidence: t.prediction.evidence ?? {}, id: t.prediction.decisionId } : null },
     });
@@ -1241,7 +1267,7 @@ function brainSnapshot() {
     opportunities: b.opportunities, watch: b.watch, avoid: b.avoid, events: (b.events ?? []).slice(0, 14),
     positions: [...state.positions.values()].filter((x) => !x.copy && !x.venue).map((x) => ({ symbol: x.symbol, action: x.brain?.action ?? 'HOLD', reasons: x.brain?.reasons ?? ['waiting for the first structure read after the entry'], setup: x.ctx?.brain?.setup?.label ?? null, invalidation: x.brain?.invalidation ?? null })),
     funnel: state.funnel ?? null, mkt: state.mkt ?? null, shortsExecuted: config.brain.allowShortTrades,
-    risks: buildRisks(), learning: learningReport(),
+    risks: buildRisks(), learning: (() => { const lr = learningReport(); return { ...lr, exploration: { ...lr.exploration, paused: explorationPause(), open: [...state.positions.values()].filter((x) => x.mode === 'exploration').length } }; })(),
     rules: { minComposite: Bc.minComposite, weights: Bc.composite, chaseWarn: Bc.chaseWarn, chaseVeto: Bc.chaseVeto, minEV: Bc.minEV, evSeK: Bc.evSeK, dataMinN: Bc.dataMinN, discovered: discovery.discoveredRules().length, minRR: R.minRR, copyTrading: 'data input only (1% weight): can never open, size or veto a trade' },
   };
 }
@@ -1274,7 +1300,7 @@ export function snapshotForUi() {
     const px = priceOf(x), ex = exitFillFor(x.side, px);
     const net = (x.realized ?? 0) + x.qty * (x.side === 'short' ? x.entry - ex : ex - x.entry) - riskLib.feeOn(x.qty * ex) - x.fee;
     return {
-      id: x.id, symbol: x.symbol, side: x.side ?? 'long', source: x.copy ? 'copy' : 'strategy', origin: x.copy ? 'mimic' : 'own', trigger: x.trigger ?? null, venue: x.venue ?? 'coinbase', trader: x.copy?.trader ?? null, traderWinRate: x.copy?.winRate ?? null,
+      id: x.id, mode: x.mode ?? 'normal', symbol: x.symbol, side: x.side ?? 'long', source: x.copy ? 'copy' : 'strategy', origin: x.copy ? 'mimic' : 'own', trigger: x.trigger ?? null, venue: x.venue ?? 'coinbase', trader: x.copy?.trader ?? null, traderWinRate: x.copy?.winRate ?? null,
       leaderPx: x.copy?.leaderPx ?? null, entry: x.entry, price: px, target: x.target, stop: x.stop, trailing: x.trailing,
       rr: x.target ? (x.target - x.entry) / (x.entry - x.stop) : null, qty: x.qty, notional: x.notional, pnl: net, pnlPct: net / (x.initCost ?? (x.notional + x.fee)), openedAt: x.openedAt, why: x.rationale,
     };

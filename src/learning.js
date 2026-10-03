@@ -78,7 +78,7 @@ export function record(d, now = Date.now(), kind = 'decision') {
   const last = [...journal.entries].reverse().find((e) => e.symbol === d.symbol && e.side === side && e.kind === kind && now - e.at < 55 * 60_000 && e.action === d.action);
   if (last && d.action !== 'BUY' && d.action !== 'SHORT') return last.id;     // one record per coin per hour per action: the outcome clock must not be flooded by repeats
   const e = {
-    id: `d${now.toString(36)}${(seq++).toString(36)}`, at: now, kind, side, symbol: d.symbol, action: d.action, verdict: d.verdict, cls: d.cls, score: d.score, scores: d.scores, pUp: d.pUp, ev: d.ev, setup: d.setup?.name ?? null,
+    id: `d${now.toString(36)}${(seq++).toString(36)}`, at: now, kind, side, mode: d.mode ?? 'normal', symbol: d.symbol, action: d.action, verdict: d.verdict, cls: d.cls, score: d.score, scores: d.scores, pUp: d.pUp, ev: d.ev, setup: d.setup?.name ?? null,
     price: d.evidence?.price ?? d.entry, entry: plan.entry, stop: plan.stop, target: plan.target, rr: plan.rr, holdHours: plan.holdHours, targetR: d.targetR ?? null, realisticR: d.realisticR ?? null,
     chase: d.chase ? { score: d.chase.score, verdict: d.chase.verdict, moveAtr: d.chase.moveAtr, distLevelAtr: d.chase.distLevelAtr, expectedMoveUsed: d.chase.expectedMoveUsed, spikeSpent: d.chase.spikeSpent, stretched: d.chase.stretched } : null,
     relStrength: d.relStrength ?? null, factors: d.factors, vetoes: d.vetoes.map((v) => v.code), hard: d.vetoes.filter((v) => v.hard).map((v) => v.code), reasons: d.reasons.slice(0, 8), whyNow: d.why?.now ?? null,
@@ -147,11 +147,13 @@ export async function resolveOutcomes(fetch15m, now = Date.now(), budget = 6) {
 }
 
 /** A real paper trade opened from decision `id`: its outcome is the real trade's, not a counterfactual. */
-export function attachTrade(id, tradeId) { const e = journal.entries.find((x) => x.id === id); if (e) { e.tradeId = tradeId; journal.dirty = true; } }
+export function attachTrade(id, tradeId, mode = 'normal') { const e = journal.entries.find((x) => x.id === id); if (e) { e.tradeId = tradeId; e.mode = mode; journal.dirty = true; } }
 export function closeTrade(tradeId, r) {
   const e = journal.entries.find((x) => x.tradeId === tradeId); if (!e) return null;
   const risk = e.entry && e.stop ? Math.abs(e.entry - e.stop) / e.entry + COST : null;
-  e.outcome = { measuredAt: Date.now(), hit: r.exitReason, R: risk ? +(r.pnlPct / risk).toFixed(2) : null, pnl: r.pnl, pnlPct: +r.pnlPct.toFixed(4), mfe: +r.mfe.toFixed(4), mae: +r.mae.toFixed(4), hoursHeld: +r.hours.toFixed(1), source: 'trade', why: r.why };
+  const R = r.R != null && Number.isFinite(r.R) ? r.R : risk ? r.pnlPct / risk : null;      // realised R of the REAL trade: net P&L / the dollars risked at entry
+  if (r.rr != null) e.execRR = +Number(r.rr).toFixed(2);
+  e.outcome = { measuredAt: Date.now(), hit: r.exitReason, R: R != null ? +R.toFixed(2) : null, pnl: r.pnl, pnlPct: +r.pnlPct.toFixed(4), mfe: +r.mfe.toFixed(4), mae: +r.mae.toFixed(4), hoursHeld: +r.hours.toFixed(1), source: 'trade', why: r.why };
   journal.dirty = true; return e;
 }
 
@@ -357,8 +359,33 @@ const stats = (rs) => {
   return { n: rs.length, winRate: +(w.length / rs.length).toFixed(2), avgR: +(rs.reduce((a, e) => a + e.outcome.R, 0) / rs.length).toFixed(2), targetFirst: +(rs.filter((e) => e.outcome.hit === 'target').length / rs.length).toFixed(2), avgMfe: +(rs.reduce((a, e) => a + (e.outcome.mfe ?? 0), 0) / rs.length).toFixed(4), avgMae: +(rs.reduce((a, e) => a + (e.outcome.mae ?? 0), 0) / rs.length).toFixed(4) };
 };
 
+/**
+ * EXPLORATION MODE results, kept separate from normal trades. The question: do setups that fail only the 2.5R requirement have POSITIVE EXPECTANCY after costs? The answer needs numbers, so:
+ * expectancy = mean realised R of closed exploration trades with a 95% confidence interval; nothing is concluded before prelimTrades, and "decisive" only at decisiveTrades. Positive means the
+ * LOWER bound of the interval is above zero. By R:R bucket so it is visible which minimum (if any) would be justified. This report NEVER changes a rule: that is a human decision.
+ */
+export function explorationReport() {
+  const X = B.explore, ts = resolvedAll().filter((e) => e.outcome.source === 'trade' && e.mode === 'exploration' && e.outcome.R != null);
+  const stat = (rows) => {
+    const n = rows.length; if (!n) return { n: 0 };
+    const R = rows.map((e) => e.outcome.R), mean = R.reduce((a, x) => a + x, 0) / n, sd = n > 1 ? Math.sqrt(R.reduce((a, x) => a + (x - mean) ** 2, 0) / (n - 1)) : null, se = sd != null ? sd / Math.sqrt(n) : null;
+    const gp = R.filter((x) => x > 0).reduce((a, x) => a + x, 0), gl = -R.filter((x) => x <= 0).reduce((a, x) => a + x, 0);
+    return { n, winRate: +(R.filter((x) => x > 0).length / n).toFixed(2), avgR: +mean.toFixed(3), totalR: +R.reduce((a, x) => a + x, 0).toFixed(2), sd: sd != null ? +sd.toFixed(2) : null, lower95: se != null ? +(mean - 1.96 * se).toFixed(3) : null, upper95: se != null ? +(mean + 1.96 * se).toFixed(3) : null, profitFactor: gl > 0 ? +(gp / gl).toFixed(2) : null,
+      avgMfe: +(rows.reduce((a, e) => a + (e.outcome.mfe ?? 0), 0) / n).toFixed(4), avgMae: +(rows.reduce((a, e) => a + (e.outcome.mae ?? 0), 0) / n).toFixed(4), avgHours: +(rows.reduce((a, e) => a + (e.outcome.hoursHeld ?? 0), 0) / n).toFixed(1) };
+  };
+  const all = stat(ts), n = ts.length;
+  const buckets = [['1.50-1.75', 1.5, 1.75], ['1.75-2.00', 1.75, 2.0], ['2.00-2.25', 2.0, 2.25], ['2.25-2.50', 2.25, 2.5]].map(([label, lo, hi]) => { const rows = ts.filter((e) => (e.execRR ?? e.rr) >= lo && (e.execRR ?? e.rr) < hi); return { label, ...stat(rows), positive: rows.length >= X.bucketMin && stat(rows).lower95 > 0 }; });
+  let verdict = 'collecting', text;
+  if (n < X.prelimTrades) text = `${n} of ${X.prelimTrades} closed exploration trades: too few to conclude anything. The normal rules (including the 2.5R minimum) stay exactly as they are.`;
+  else if (all.lower95 > 0) { verdict = n >= X.decisiveTrades ? 'positive (decisive)' : 'positive (preliminary)'; text = `average ${all.avgR}R, 95% interval ${all.lower95}R to ${all.upper95}R: the whole interval is above zero${n >= X.decisiveTrades ? '' : ' (preliminary: wait for ' + X.decisiveTrades + ' trades)'}. Whether to lower the normal R:R minimum is a human decision: the R:R buckets below show which minimum, if any, is itself positive.`; }
+  else if (all.upper95 < 0) { verdict = n >= X.decisiveTrades ? 'negative (decisive)' : 'negative (preliminary)'; text = `average ${all.avgR}R, 95% interval ${all.lower95}R to ${all.upper95}R: the whole interval is below zero. Lower-R:R setups lose money after costs; the 2.5R minimum stays.`; }
+  else { verdict = n >= X.decisiveTrades ? 'inconclusive (decisive sample)' : 'inconclusive'; text = `average ${all.avgR}R, 95% interval ${all.lower95}R to ${all.upper95}R includes zero: no demonstrated edge${n >= X.decisiveTrades ? ' even with ' + X.decisiveTrades + '+ trades' : ' yet'}. The 2.5R minimum stays.`; }
+  const pnlUsd = +journal.entries.filter((e) => e.mode === 'exploration' && e.outcome?.source === 'trade').reduce((a, e) => a + (e.outcome.pnl ?? 0), 0).toFixed(2);
+  return { enabled: X.enabled, n, ...all, pnlUsd, targetPrelim: X.prelimTrades, targetDecisive: X.decisiveTrades, progress: +Math.min(1, n / X.decisiveTrades).toFixed(2), verdict, text, buckets, risk: { min: X.riskMin, max: X.riskMax }, recent: ts.slice(-8).reverse().map((e) => ({ symbol: e.symbol, setup: e.setup, rr: e.execRR ?? e.rr, R: e.outcome.R, hit: e.outcome.hit, pnl: e.outcome.pnl, why: e.outcome.why })) };
+}
+
 export function report(now = Date.now()) {
-  const all = resolvedAll(), trades = all.filter((e) => e.outcome.source === 'trade'), cf = all.filter((e) => e.outcome.source === 'candles');
+  const all = resolvedAll(), trades = all.filter((e) => e.outcome.source === 'trade' && e.mode !== 'exploration'), cf = all.filter((e) => e.outcome.source === 'candles');
   const buckets = [['80+', (s) => s >= 80], ['70-80', (s) => s >= 70 && s < 80], ['60-70', (s) => s >= 60 && s < 70], ['<60', (s) => s < 60]].map(([label, f]) => ({ label, ...stats(cf.filter((e) => f(e.score))) }));
   // Do the vetoes earn their keep? For every veto code: what did the setups it blocked actually do, and how many big moves did it sit on?
   const vetoRows = new Map();
@@ -377,7 +404,7 @@ export function report(now = Date.now()) {
     trades: stats(trades), counterfactual: stats(cf), calibration: buckets, rules: journal.rules.slice(0, 14), activeRules: journal.rules.filter((r) => r.status === 'active').length,
     vetoes, missed: { list: journal.missed.slice(0, 12), count: journal.missed.length, early: flaggedEarly, topReasons: Object.entries(reasons).sort((a, b) => b[1] - a[1]).map(([code, n]) => ({ code, n, text: VETO_TEXT[code] ?? code })), checkedAt: journal.missedAt || null }, sufficiency: need,
     byKind: { decisions: cf.filter((e) => e.kind !== 'ignored').length, ignored: cf.filter((e) => e.kind === 'ignored').length, ignoredStats: stats(cf.filter((e) => e.kind === 'ignored')), longs: stats(cf.filter((e) => e.side !== 'short')), shorts: stats(cf.filter((e) => e.side === 'short')) },
-    reliability: reliability(), historical: historicalMeta(), lossClusters: lossClusters(), news: { rows: newsRows(), logged: journal.news.length, measured: journal.news.filter((n) => n.reaction?.complete4).length },
+    exploration: explorationReport(), reliability: reliability(), historical: historicalMeta(), lossClusters: lossClusters(), news: { rows: newsRows(), logged: journal.news.length, measured: journal.news.filter((n) => n.reaction?.complete4).length },
     recentTrades: trades.slice(-8).reverse().map((e) => ({ symbol: e.symbol, setup: e.setup, score: e.score, R: e.outcome.R, pnl: e.outcome.pnl, hit: e.outcome.hit, mfe: e.outcome.mfe, mae: e.outcome.mae, why: e.outcome.why })),
   };
 }
