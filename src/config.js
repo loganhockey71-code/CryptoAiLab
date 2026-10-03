@@ -104,6 +104,10 @@ export const config = {
     // EXPLORATION MODE (paper only): a setup that fails ONLY the protected 2.5R requirement may be traded at TINY risk so its real expectancy can be measured. The EV test is waived for it (EV is computed at the
     // lower R:R, so it is the same requirement seen from the other side, and requiring it would make the experiment impossible). Every other rule (vetoes, composite floor, stop cap, circuit breakers, cooldown, fresh price, position cap) still applies. Outcomes are tracked separately; the normal rules (including the 2.5R minimum) change only by a human decision
     // after enough exploration trades show positive expectancy. minRR is a sanity floor for what counts as an exploration setup (1.5R net).
+    // HIGH-CONVICTION STOP: the tier stop bands (BTC 2%, ETH 2.5%, Top 20 3%...) can clamp the structural stop tighter than the structure really needs. When the Brain clearly sees the coin going up
+    // (strong direction, strong composite, fresh timing, BTC not weak) AND the structural stop was clamped, the stop may go out to the SAME 4% hard cap. Size still shrinks with the stop (1% risk), the
+    // net R:R must still be >= 2.5 with the wider stop, and a stop is never widened after entry. This never raises the 4% cap, the 1% risk or any size.
+    wideStop: Object.freeze({ enabled: true, minComposite: 70, minDirection: 70, minTiming: 55, minRegime: -0.25 }),
     explore: Object.freeze({ enabled: true, minRR: 1.5, riskMin: 0.001, riskMax: 0.0025, maxOpen: 2, reserveSlots: 1, prelimTrades: 50, decisiveTrades: 100, bucketMin: 15, budgetPct: 0.02, floorDrop: 5 }),     // budgetPct: exploration pauses itself once its closed trades have lost 2% of the starting capital
     zoneTolerance: 0.5,                      // price up to this many ATRs beyond the planned zone: the zone is RECALCULATED around the live price instead of giving up
     cancelBeyond: 1.0,                       // a pending entry is cancelled (and recalculated next scan) when price runs this many ATRs past the zone: never chased

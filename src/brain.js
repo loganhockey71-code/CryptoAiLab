@@ -377,7 +377,7 @@ function evaluate(side, inp, T) {
   if (h1.box && h1.box.state === 'inside' && h1.box.pos > 0.35 && h1.box.pos < 0.65 && !(best && ['trend_pullback', 'failed_bounce', 'support_bounce'].includes(best.name))) pen('mid_range', 3, `price is in the middle of the 1h range ${f2(h1.box.lo)}-${f2(h1.box.hi)}: a weaker location, not a rejection`);
 
   /* ---- 3. plan: stop, target, spread-inclusive R:R, empirical probability and EV */
-  let shaped = null, stopRef = null, targetRef = null, holdHours = null, room = null, chase = null, zone = null, timing = null, emp = null, realisticR = null, ev = null, evLB = null, evSE = null, pUp = null, rTarget = null, rrNet = null, confidence = 0;
+  let stopClamped = false, shaped = null, stopRef = null, targetRef = null, holdHours = null, room = null, chase = null, zone = null, timing = null, emp = null, realisticR = null, ev = null, evLB = null, evSE = null, pUp = null, rTarget = null, rrNet = null, confidence = 0;
   if (best) {
     const minDist = Math.max(0.5 * m15.atr, price * 0.004);
     stopRef = pickStop(price, best.stopRefs, minDist, side) ?? (long ? price - 1.5 * h1.atr : price + 1.5 * h1.atr);
@@ -387,8 +387,10 @@ function evaluate(side, inp, T) {
     room = tr[0] != null ? Math.abs(tr[0] - price) / risk : null;
     // risk.shapeTrade is long-only maths: for a short it is run on the mirrored prices
     const mirror = (x) => (2 * price - x);
-    const sh = long ? inp.shape(price, stopRef, targetRef) : inp.shape(price, mirror(stopRef), mirror(targetRef));
+    const wideOpt = { wide: !!inp.wide };
+    const sh = long ? inp.shape(price, stopRef, targetRef, wideOpt) : inp.shape(price, mirror(stopRef), mirror(targetRef), wideOpt);
     shaped = long ? sh : { ...sh, stop: mirror(sh.stop), target: mirror(sh.target) };
+    stopClamped = !!sh.clamped;      // the structure wanted a wider stop than this coin's tier band allows
     // EV must include fees, slippage AND the spread: rr (net of fees + slippage) is re-priced with the quoted spread
     const sp = (inp.book?.spreadPct ?? 0) / 100, riskPct = shaped.stopDist + COST_RT;
     rrNet = +(((shaped.rr * riskPct) - sp) / (riskPct + sp)).toFixed(3);
@@ -548,7 +550,7 @@ function evaluate(side, inp, T) {
     score, mean: +mean.toFixed(1), floor, scores, pUp: pUp ?? 0, pUpSource: emp ? emp.source : 'no setup', pSample: emp?.n ?? 0, confidence, ev, evLB, evSE, setup: best ? { name: best.name, label: best.label, quality: +best.quality.toFixed(2), reversal: !!best.reversal, discovered: !!best.discovered } : null,
     entry: shaped ? price : null, stop: shaped?.stop ?? null, target: shaped?.target ?? null, rr: rrNet != null ? +rrNet.toFixed(2) : null, stopDist: shaped?.stopDist ?? null, holdHours,
     entryZone: zone ? { lo: zone.lo, hi: zone.hi, level: zone.level, planned: zone.planned, atr: zone.atr, recalculated: !!zone.recalculated } : null, maxEntry: zone ? (long ? zone.hi : zone.lo) : null,
-    chase, timing, why, realisticR, targetR: rTarget != null ? +rTarget.toFixed(2) : null, riskMult: reg.riskMult ?? 1, setupsFound: setups.map((x) => x.name), exploration,
+    chase, timing, why, realisticR, targetR: rTarget != null ? +rTarget.toFixed(2) : null, riskMult: reg.riskMult ?? 1, setupsFound: setups.map((x) => x.name), exploration, stopClamped, stopWide: !!(inp.wide && shaped?.band?.wide),
     reasons, vetoes, cautions, penalties: pens, waitingFor, blocked: vetoes.map((v) => v.text), adjustments: inp.adj ?? [],
     factors: { ...Object.fromEntries(Object.entries(fam).map(([k, v]) => [k, +v.toFixed(2)])), context: +ctxFam.toFixed(2) }, families: { agree, count: agree.length },
     relStrength: { vs1h: +rel.vs1h.toFixed(4), vsBTC24: +rel.vsBTC24.toFixed(4), vsETH24: +rel.vsETH24.toFixed(4), vsMkt24: +rel.vsMkt24.toFixed(4) },
@@ -579,7 +581,14 @@ export function decide(inp) {
   const subs = [];
   if (!T['4h']) { T = { ...T, '4h': T['1h'] }; subs.push('4h history is not available yet: the 1h stands in for it'); }
   if (!T['5m']) { T = { ...T, '5m': T['15m'] }; subs.push('5m history is not available: the 15m stands in for it'); }
-  const L = evaluate('long', subs.length ? { ...inp, warnings: [...(inp.warnings ?? []), ...subs] } : inp, T);
+  const inpL = subs.length ? { ...inp, warnings: [...(inp.warnings ?? []), ...subs] } : inp;
+  let L = evaluate('long', inpL, T);
+  // HIGH CONVICTION: when the long is a clear BUY, the structure wanted a wider stop than the tier band, and every conviction test passes, re-plan with the stop allowed out to the 4% hard cap.
+  const WS = B.wideStop;
+  if (WS?.enabled && L.action === 'BUY' && L.stopClamped && L.scores.direction >= WS.minDirection && L.score >= WS.minComposite && L.scores.timing >= WS.minTiming && (inp.regime?.score ?? 0) >= WS.minRegime && L.chase?.verdict !== 'chasing') {
+    const W2 = evaluate('long', { ...inpL, wide: true }, T);
+    if (W2.action === 'BUY' && W2.stopWide) { W2.reasons = [`High conviction (direction ${L.scores.direction}, composite ${L.score}, timing ${L.scores.timing}): the stop uses the structure level (${((1 - W2.stop / W2.entry) * 100).toFixed(1)}% below entry, still within the ${(R.stopAbsMaxPct * 100).toFixed(0)}% hard cap) instead of the tighter tier band; size shrinks with the stop`, ...W2.reasons]; L = W2; }
+  }
   const S = B.detectShorts ? evaluate('short', inp, T) : null;
   let primary = L;
   if (L.action !== 'BUY') {

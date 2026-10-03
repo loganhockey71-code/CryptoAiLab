@@ -21,8 +21,9 @@ export function stopBand(symbol, rank) {
 }
 
 /** Normalise the stop into the coin's band (never wider than 4%), then compute net R:R after fees + slippage. */
-export function shapeTrade(entry, llmStop, llmTarget, { symbol, rank } = {}) {
-  const band = stopBand(symbol, rank);
+export function shapeTrade(entry, llmStop, llmTarget, { symbol, rank, wide = false } = {}) {
+  const tierBand = stopBand(symbol, rank);
+  const band = wide ? { ...tierBand, max: tierBand.absMax, wide: true } : tierBand;     // high conviction: the stop may use the full 4% hard cap, never more
   const rawDist = llmStop != null && llmStop < entry ? (entry - llmStop) / entry : band.max;
   const stopDist = clamp(rawDist, band.min, band.max);
   const stop = entry * (1 - stopDist);
@@ -32,7 +33,7 @@ export function shapeTrade(entry, llmStop, llmTarget, { symbol, rank } = {}) {
   const target = entry * (1 + Math.min(tDist, band.tier === 'meme' ? R.memeTargetCap : tb[1]));
   const reward = target - entry - ROUND_TRIP_COST_PCT * entry;
   const risk = entry - stop + ROUND_TRIP_COST_PCT * entry;
-  return { stop, target, stopDist, band, targetBand: tb, rr: reward > 0 ? reward / risk : 0, grossRr: (target - entry) / (entry - stop) };
+  return { stop, target, stopDist, clamped: rawDist > band.max + 1e-9, band, targetBand: tb, rr: reward > 0 ? reward / risk : 0, grossRr: (target - entry) / (entry - stop) };
 }
 
 /** Is trading globally allowed right now? (circuit breakers) */

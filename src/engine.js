@@ -297,7 +297,7 @@ function thinkAbout(cs, env) {
     warnings: [...radarLib.screenWarnings(coin), ...(cs.health?.warn ? [cs.health.warn] : [])], discovered: discovery.discoveredRules(),
     chg1h: cs.chg?.h1 ?? 0, chg24h: cs.chg?.h24 ?? 0, rs: env.rs, empirical: env.empirical, selected: (cs.prioReasons ?? []).slice(0, 3).map((r) => `ranked up by: ${r}`),
     vol24: coin.vol24, smart: smartMoneyProvider ? smartMoneyProvider(cs.symbol) : null, adj: [],
-    shape: (e, st, tg) => riskLib.shapeTrade(e, st, tg, { symbol: cs.symbol, rank: coin.rank ?? 100 }),
+    shape: (e, st, tg, o = {}) => riskLib.shapeTrade(e, st, tg, { symbol: cs.symbol, rank: coin.rank ?? 100, ...o }),
   };
   let d = brain.decide(base);
   const adj = learning.adjustmentsFor(d);                       // validated general rules only (bounded points); may change the score, never a veto or a risk limit
@@ -597,7 +597,7 @@ async function tryEnter(p, confirmation) {
     else if (confirmation?.c > 0 && Math.abs(fp.price / confirmation.c - 1) > R.maxEntryDriftPct) execReasons.push(`execution price ${fp.price} is ${(Math.abs(fp.price / confirmation.c - 1) * 100).toFixed(2)}% away from the confirmed price ${confirmation.c} (max ${R.maxEntryDriftPct * 100}%)`);
     if (d.entryZone && fp.price != null && fp.price > d.entryZone.hi + 0.25 * (d.entryZone.atr ?? 0)) execReasons.push(`not chasing: execution price ${fp.price} is beyond the (recalculated) entry zone (top ${d.entryZone.hi.toPrecision(6)})`);
     // The Brain proposes the structural stop and target; risk.shapeTrade keeps the stop inside the coin's band (never wider than 4%) and re-prices R:R at the LIVE entry.
-    const shaped = riskLib.shapeTrade(live, d.stop, d.target, { symbol: p.symbol, rank: cs?.coin?.rank ?? 100 });
+    const shaped = riskLib.shapeTrade(live, d.stop, d.target, { symbol: p.symbol, rank: cs?.coin?.rank ?? 100, wide: !!d.stopWide });
     const reasons = riskLib.entryFilters({
       signal: { direction: 'bullish' }, entry: live, shaped, composite: d.score, floor: p.mode === 'exploration' && d.exploration?.kind === 'lowScore' ? d.floor - config.brain.explore.floorDrop : d.floor, minRR: p.mode === 'exploration' && d.exploration?.kind === 'lowRR' ? config.brain.explore.minRR : undefined, btc: { ...btc, severe: !!state.brain.regime?.severe }, portfolio: state.portfolio,
       openCount: state.positions.size, cooldownUntil: cs?.coin?.cooldownUntil, dataFresh: fp.price != null,

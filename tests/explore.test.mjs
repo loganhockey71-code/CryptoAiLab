@@ -153,3 +153,28 @@ test('exploration report splits the two experiments and shows fees/slippage in R
   assert.equal(x.byKind.lowScore.n, 3); assert.equal(x.byKind.lowRR.n, 3);
   assert.ok(x.byKind.lowScore.avgCostR > 0 && x.byKind.lowScore.avgPredEV === 0.1 && x.byKind.lowScore.scoreBuckets.length === 2);
 });
+
+/* ------------------------------------------------------------ high-conviction stop */
+test('high-conviction stop: shapeTrade lets the stop use the 4% hard cap ONLY when asked, and never more', () => {
+  const tier = risk.shapeTrade(100, 96.5, 112, { symbol: 'BTC', rank: 1 }), wide = risk.shapeTrade(100, 96.5, 112, { symbol: 'BTC', rank: 1, wide: true }), huge = risk.shapeTrade(100, 90, 130, { symbol: 'BTC', rank: 1, wide: true });
+  assert.ok(Math.abs(tier.stopDist - 0.02) < 1e-9 && tier.clamped, 'BTC tier band caps the stop at 2%');
+  assert.ok(Math.abs(wide.stopDist - 0.035) < 1e-9 && !wide.clamped, 'high conviction uses the structure level (3.5%)');
+  assert.ok(Math.abs(huge.stopDist - config.risk.stopAbsMaxPct) < 1e-9, 'never beyond the 4% hard cap');
+});
+
+test('high-conviction stop: a clear BUY whose structural stop was clamped is re-planned with the wider stop (only if R:R still passes); a weak BTC never gets it', () => {
+  const tables = {}; for (const k of ['breakout_retest', 'trend_pullback', 'range_breakout', 'momentum_continuation', 'liquidity_sweep', 'trend_reversal']) tables[`long:${k}`] = { n: 60, hits: [58, 56, 54, 52, 50, 48, 46] };
+  const gen = buildModel(tables, []);
+  const stub = (sym, rank, tmul) => (e, st, tg, o = {}) => risk.shapeTrade(e, e - 1.8 * (e - st), e + tmul * (tg - e), { symbol: sym, rank, wide: o.wide });   // the structure wants a stop wider than the tier band
+  const near = S.decideOn(fresh, { empirical: gen, shapeFor: stub('TEST', 10, 1) }).d;     // near target: a wider stop would break 2.5R, so the tier band is kept
+  assert.equal(near.stopWide, false); assert.ok(1 - near.stop / near.entry <= 0.0301);
+  const far = S.decideOn(fresh, { empirical: gen, shapeFor: stub('TEST', 10, 1.7) }).d;    // far target: the wider structural stop still gives >= 2.5R
+  assert.equal(far.action, 'BUY'); assert.equal(far.stopWide, true);
+  const dist = 1 - far.stop / far.entry;
+  assert.ok(dist > 0.03 && dist <= config.risk.stopAbsMaxPct + 1e-9 && far.rr >= config.risk.minRR, `stop ${dist}, R:R ${far.rr}`);
+  assert.ok(far.scores.direction >= config.brain.wideStop.minDirection && far.score >= config.brain.wideStop.minComposite);
+  assert.ok(far.reasons[0].startsWith('High conviction'));
+  assert.ok(risk.explorationNotional(2000, 0.01, dist, 600) < risk.explorationNotional(2000, 0.01, 0.03, 600), 'a wider stop means a smaller position at the same 1% risk');
+  const weak = S.decideOn(fresh, { empirical: gen, regime: { ...S.regimeBear, score: -0.5, allowLongs: true, severe: false, riskMult: 0.6 }, shapeFor: stub('TEST', 10, 1.7) }).d;
+  assert.equal(weak.stopWide, false, 'a weak BTC regime never gets the wide stop');
+});
