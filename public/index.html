@@ -16,6 +16,7 @@
     <a href="#alerts" data-view="alerts">Alerts</a>
     <a href="#leaderboard" data-view="leaderboard">AI Leaderboard</a>
     <a href="#categories" data-view="categories">Categories</a>
+    <a href="#history" data-view="history">History</a>
     <a href="#portfolio" data-view="portfolio">Portfolio</a>
   </nav>
   <div class="stats" id="stats"></div>
@@ -90,6 +91,14 @@
   </section>
 </main>
 
+<main id="view-history" class="grid-1 view hidden">
+  <section class="panel history-panel">
+    <div class="panel-head"><h2>Trade History <small>closed trades · win or loss, net of fees &amp; slippage</small></h2></div>
+    <div id="history-stats" class="chips"></div>
+    <div class="scroll" id="history"></div>
+  </section>
+</main>
+
 <main id="view-portfolio" class="grid view hidden">
   <section class="panel regime-panel">
     <div class="panel-head"><h2>Market Regime <small id="regime-note">BTC / ETH structure, breadth, macro and news</small></h2></div>
@@ -129,12 +138,6 @@
       <div><h3>Shortlist leaders <small>top by priority</small></h3><div id="radar-short" class="scroll"></div></div>
       <div><h3>No market <small>moving, but listed on neither Coinbase nor Gate.io</small></h3><div id="radar-watch" class="scroll"></div></div>
     </div>
-  </section>
-
-  <section class="panel history-panel">
-    <div class="panel-head" id="trade-history"><h2>Trade History <small>closed trades · win or loss, net of fees &amp; slippage</small></h2></div>
-    <div id="history-stats" class="chips"></div>
-    <div class="scroll" id="history"></div>
   </section>
 
   <section class="panel copy-panel">

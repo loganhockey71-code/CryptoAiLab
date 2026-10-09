@@ -12,7 +12,6 @@ body { min-height: 100vh; }
 .stats { display: flex; gap: 18px; flex-wrap: wrap; }
 .stat { display: flex; flex-direction: column; min-width: 70px; }
 html { scroll-behavior: smooth; }
-#trade-history { scroll-margin-top: 90px; }
 a.stat.jump { text-decoration: none; color: inherit; cursor: pointer; border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; }
 a.stat.jump:hover { border-color: #26a69a; }
 a.stat.jump span { color: #26a69a; }

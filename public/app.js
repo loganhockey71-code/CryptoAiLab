@@ -12,7 +12,7 @@ let selected = 'BTC';
 let latest = null;
 
 /* ------------------------------------------------------------------ router */
-const VIEWS = ['tokens', 'hot', 'alerts', 'leaderboard', 'categories', 'portfolio'];
+const VIEWS = ['tokens', 'hot', 'alerts', 'leaderboard', 'categories', 'history', 'portfolio'];
 function showView(name) {
   if (!VIEWS.includes(name)) name = 'tokens';
   for (const v of VIEWS) $(`#view-${v}`).classList.toggle('hidden', v !== name);
@@ -59,7 +59,7 @@ function renderStats(s) {
     stat('Realized P&L', money(p.realized_pnl), cls(p.realized_pnl)),
     stat('Today (UTC)', pct(p.dailyPnlPct), cls(p.dailyPnlPct)),
     stat('BTC 1h EMA (info)', btc.toUpperCase(), btc === 'bullish' ? 'up' : btc === 'bearish' ? 'down' : 'warn'),
-    `<a class="stat jump" href="#trade-history" title="Jump to Trade History"><b>${s.tradeCount ?? 0}</b><span>Trades ↓ history</span></a>`,
+    `<a class="stat jump" href="#history" title="Open Trade History"><b>${s.tradeCount ?? 0}</b><span>Trades → history</span></a>`,
     stat('Open', `${s.positions.length}/${s.limits.maxPositions}`),
     stat('Feed', h.wsConnected ? (h.feedStale ? 'STALE' : 'LIVE') : 'OFFLINE', h.wsConnected && !h.feedStale ? 'up' : 'down'),
     stat('Scan', s.scan.running ? esc(s.scan.progress || 'running') : s.scan.finishedAt ? `#${s.scan.count} ${ago(s.scan.finishedAt)}` : 'starting', s.scan.lastError ? 'down' : ''),
@@ -432,7 +432,8 @@ function renderView(name, s) {
   else if (name === 'alerts') renderAlerts(s);
   else if (name === 'leaderboard') renderLeaderboard(s);
   else if (name === 'categories') renderCategories(s);
-  else if (name === 'portfolio') { renderBrain(s.brain); renderPositions(s); renderHistory(s.history); renderNews(s.newsFeed); renderRadar(s.radar); renderCopy(s.copy); renderDecisions(s); renderReflections(s); }
+  else if (name === 'history') renderHistory(s.history);
+  else if (name === 'portfolio') { renderBrain(s.brain); renderPositions(s); renderNews(s.newsFeed); renderRadar(s.radar); renderCopy(s.copy); renderDecisions(s); renderReflections(s); }
 }
 function render(s) {
   latest = s;
