@@ -11,8 +11,9 @@ export function categoriesFor(coin, bySlug, categoryList, majorRank) {
 }
 
 /** Ring-buffer insert, newest first, capped. Mutates and returns `alerts`. `now`/`cap` are injectable for deterministic tests. */
+let alertSeq = 0;
 export function pushAlert(alerts, entry, { cap = 300, now = Date.now() } = {}) {
-  alerts.unshift({ at: now, ...entry });
+  alerts.unshift({ at: now, seq: alertSeq++, ...entry });
   if (alerts.length > cap) alerts.length = cap;
   return alerts;
 }

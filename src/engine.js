@@ -1357,8 +1357,8 @@ export function snapshotForUi() {
   };
 }
 
-/** Alerts older than `beforeTs` (default: now), newest first, for the Alerts page's "load more". */
-export function alertsPage(beforeTs = Date.now(), limit = 100) {
-  return state.alerts.filter((a) => a.at < beforeTs).slice(0, limit);
+/** Alerts pushed before `beforeSeq` (default: everything), newest first, for the Alerts page's "load more". */
+export function alertsPage(beforeSeq = Infinity, limit = 100) {
+  return state.alerts.filter((a) => a.seq < beforeSeq).slice(0, limit);
 }
 export const __test = { chandelierStop, onTick, onMomentumCheck };
