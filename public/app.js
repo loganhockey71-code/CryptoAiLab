@@ -368,7 +368,22 @@ function renderHot(s) {
     <td class="r"><span class="heat" title="${esc(Object.entries(r.hot.parts).map(([k, v]) => `${partLabel[k] || k} ${v}`).join(', '))}"><b style="width:${Math.min(100, r.hot.total * 12)}%"></b></span> ${r.hot.total}</td></tr>`).join('')
     : '<tr><td colspan="7" class="empty">No coin currently has a live volume, momentum, trending or sentiment signal.</td></tr>';
 }
-function renderAlerts() {}
+let alertType = 'all';
+function renderAlerts(s) {
+  const newsAlerts = (s.newsFeed.items || []).map((i) => ({ at: i.publishedAt, type: 'news', symbol: '*', text: `${esc(i.source)}: ${esc(i.title)}` }));
+  const all = [...s.alerts, ...newsAlerts].sort((a, b) => b.at - a.at).slice(0, 200);
+  const rows = alertType === 'all' ? all : all.filter((a) => a.type === alertType);
+  $('#alerts-note').textContent = `${rows.length} of ${all.length} alerts (news items read every scan, plus HOT/signal/trade events)`;
+  $('#alerts-list').innerHTML = rows.length ? rows.map((a) => `<div class="alert-row"><span class="muted">${ago(a.at)}</span><span class="pill type-${esc(a.type)}">${esc(a.type)}</span>${a.symbol && a.symbol !== '*' ? `<b>${esc(a.symbol)}</b>` : ''}<span>${a.text}</span></div>`).join('')
+    : '<div class="empty">No alerts yet.</div>';
+}
+$('#alert-filter').addEventListener('click', (e) => {
+  const b = e.target.closest('.tog');
+  if (!b) return;
+  document.querySelectorAll('#alert-filter .tog').forEach((x) => x.classList.toggle('on', x === b));
+  alertType = b.dataset.type;
+  if (latest) renderAlerts(latest);
+});
 function renderLeaderboard() {}
 function renderCategories() {}
 
