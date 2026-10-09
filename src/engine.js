@@ -199,6 +199,7 @@ async function runScan() {
     for (const cs of state.coins.values()) cs.sentiment = cs.coin ? src.coinSentiment(news, cs.coin) : null;
 
     cgTrending().then((t) => { state.trending = t; }).catch(() => {});   // cached 15 min; never lets a CoinGecko rate-limit pause hold up the scan
+    cgCategories().then((c) => { state.categories = c; }).catch(() => {});   // cached several hours; same non-blocking pattern
     state.ctx = { news, macro, bills, onchain, politics };
     s.progress = 'thinking: ranking coins, reading structure and news';
     await runBrain({ news, macro, bills, onchain, politics });
@@ -338,11 +339,12 @@ async function runBrain(ctxSources) {
   };
   const decisions = [];
   for (const cs of coins) {
-    const prev = cs.brain?.score;
+    const prev = cs.brain?.score, prevCls = cs.brain?.cls;
     const d = thinkAbout(cs, env);
     cs.brainDelta = prev != null ? d.score - prev : 0; cs.brain = d;
     decisions.push(d);
     learning.noteScan(cs.symbol, d, now);
+    if (d.cls === 'HOT' && prevCls !== 'HOT') dashboard.pushAlert(state.alerts, { type: 'signal', symbol: d.symbol, text: `${d.symbol} entered HOT classification (score ${d.score}${d.setup ? `, ${d.setup.label}` : ''})` });
   }
   for (const cs of state.coins.values()) if (!cs.coin?.tradable) cs.brain = null;
 
@@ -354,6 +356,18 @@ async function runBrain(ctxSources) {
   const by = (cls) => decisions.filter((d) => d.cls === cls);
   const live1 = (d) => d.action === 'BUY' || d.action === 'SHORT';
   const opp = decisions.filter((d) => live1(d) || d.cls === 'HOT' || d.cls === 'SHORT' || d.action === 'WATCH').sort((a, b) => (live1(a) ? 0 : 1) - (live1(b) ? 0 : 1) || b.score - a.score || b.scores.direction - a.scores.direction);
+  const liveSymbols = new Set(decisions.filter(live1).map((d) => d.symbol));
+  for (const sym of liveSymbols) if (!state.prevLiveSymbols.has(sym)) {
+    const d = decisions.find((x) => x.symbol === sym);
+    dashboard.pushAlert(state.alerts, { type: 'signal', symbol: sym, text: `${sym}: new ${d.action} signal (score ${d.score}, EV ${d.ev ?? '—'}R${d.setup ? `, ${d.setup.label}` : ''})` });
+  }
+  state.prevLiveSymbols = liveSymbols;
+  const activeRules = learningReport().activeRules ?? 0;
+  if (state.lastActiveRuleCount != null && activeRules > state.lastActiveRuleCount) {
+    dashboard.pushAlert(state.alerts, { type: 'signal', symbol: '*', text: `${activeRules - state.lastActiveRuleCount} learned rule(s) went active (now ${activeRules} total)` });
+  }
+  state.lastActiveRuleCount = activeRules;
+
   state.brain = {
     ...state.brain, at: now, env, regime, market, events: events.slice(0, 30), breadth, analysed: decisions.length,
     counts: { BUY: decisions.filter((d) => d.action === 'BUY').length, SHORT: decisions.filter((d) => d.action === 'SHORT').length, WAIT: decisions.filter((d) => d.action === 'WATCH').length, HOT: by('HOT').length, WATCH: by('WATCH').length, NEUTRAL: by('NEUTRAL').length, AVOID: by('AVOID').length, IGNORE: by('IGNORE').length },
