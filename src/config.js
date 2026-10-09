@@ -180,6 +180,20 @@ export const config = {
     minMcapUsd: 5_000_000, maxVolMcap: 3, washCapCeiling: 500_000_000,   // manipulation screens
     thinSpikePct: 0.20, thinSpikeVol: 3_000_000,
   }),
+  // Categories page: a fixed small set of CoinGecko category slugs, refreshed on a slow cadence (one call per slug, not per coin).
+  // majorRank: a coin with cg_rank <= majorRank is tagged "major" regardless of its other categories.
+  categories: Object.freeze({
+    everyMs: 6 * 60 * 60_000,
+    majorRank: 100,
+    list: Object.freeze([
+      { slug: 'meme-token', label: 'Meme' },
+      { slug: 'decentralized-finance-defi', label: 'DeFi' },
+      { slug: 'artificial-intelligence', label: 'AI' },
+      { slug: 'gaming', label: 'Gaming' },
+      { slug: 'layer-1', label: 'Layer 1' },
+      { slug: 'real-world-assets-rwa', label: 'RWA' },
+    ]),
+  }),
   // AI provider handling. An error that cannot succeed until a reset is not retried: that model is skipped until then (the values below are only fallbacks when the provider gives no reset time).
   // pressureMaxSignals: once any model has hit a DAILY quota, only this many of the best candidates are sent to the AI per scan, so what is left is reserved for them.
   // maxAttemptsPerSignal: HTTP calls one signal may make for TRANSIENT trouble (timeouts, 5xx, unparseable output) = the first call + 1 retry in total, across every model.
