@@ -115,6 +115,30 @@ export async function cgTrending() {
   return trendingCache.set;
 }
 
+/** CoinGecko's markets list filtered by category, one call per configured slug (config.categories.list), cached on config.categories.everyMs.
+ *  Returns Map<slug, Set<coingecko_id>>. A slug whose fetch fails keeps its last good set (stale beats empty) and the cache is retried sooner. */
+let categoryCache = { at: 0, bySlug: new Map() };
+export async function cgCategories() {
+  const Zc = config.categories;
+  if (categoryCache.at && Date.now() - categoryCache.at < Zc.everyMs) return categoryCache.bySlug;
+  const bySlug = new Map();
+  let okAny = false;
+  for (const { slug } of Zc.list) {
+    try {
+      const rows = await cgFetch(`/coins/markets?vs_currency=usd&category=${slug}&per_page=250`, 'lo');
+      bySlug.set(slug, new Set(rows.map((r) => r.id)));
+      okAny = true;
+    } catch (e) {
+      warn(`CoinGecko category '${slug}' unavailable:`, e.message);
+      bySlug.set(slug, categoryCache.bySlug.get(slug) ?? new Set());
+    }
+  }
+  categoryCache = okAny ? { at: Date.now(), bySlug } : { at: Date.now() - Zc.everyMs + 5 * 60_000, bySlug };
+  return categoryCache.bySlug;
+}
+/** Age of the current category cache in ms, or null before the first fetch (for the UI's staleness label). */
+export function categoriesAgeMs() { return categoryCache.at ? Date.now() - categoryCache.at : null; }
+
 export const universe = { coins: new Map(), updatedAt: 0, cmcAvailable: false, lastError: null, coinbaseMarkets: 0 };
 
 const frac = (x) => (x == null || Number.isNaN(Number(x)) ? null : Number(x) / 100);   // CoinGecko sends percentages
