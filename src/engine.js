@@ -668,6 +668,7 @@ async function tryEnter(p, confirmation) {
     persistPortfolio(true);
     feed.backfill1m(p.product);
     logDecision('entered', p.symbol, `${exploring ? 'EXPLORATION ' : ''}PAPER LONG ${qty.toPrecision(5)} @ ${entryPx.toPrecision(6)} ($${notional.toFixed(0)}, ${pct(sizePct)} of equity) stop ${stopPx.toPrecision(6)} (${pct(fin.stopPct)}) risk $${fin.riskUsd.toFixed(2)} (${pct(fin.riskUsd / equity)} of equity) target ${shaped.target.toPrecision(6)} · ${d.setup.label}`);
+    dashboard.pushAlert(state.alerts, { type: 'trade', symbol: p.symbol, text: `${exploring ? 'Exploration' : 'Paper'} long opened: ${qty.toPrecision(5)} @ ${entryPx.toPrecision(6)} (${d.setup.label}), stop ${stopPx.toPrecision(6)}, target ${shaped.target.toPrecision(6)}` });
   } catch (e) {
     warn('tryEnter failed', p.symbol, e.message);
     await failSignal(p, 'skipped', `entry error: ${e.message}`);
@@ -850,6 +851,7 @@ export async function closePosition(pos, price, reason) {
     gross_pnl: gross, final_pnl: finalPnl, final_pnl_pct: finalPct, actual_result: actual, high_water: pos.highWater, trailing_stop: pos.trailing,
   });
   logDecision('exit', pos.symbol, `${reason}: net P&L $${finalPnl.toFixed(2)} (${pct(finalPct)})${pos.copy ? ` [copy of ${pos.copy.trader.slice(0, 8)}]` : ''}`);
+  dashboard.pushAlert(state.alerts, { type: 'trade', symbol: pos.symbol, text: `Position closed (${reason}): net P&L $${finalPnl.toFixed(2)} (${pct(finalPct)})` });
   if (reason === 'stop_loss' || reason === 'downtrend_exit' || (reason === 'brain_sell' && finalPnl < 0)) {         // do not buy straight back into a coin that just kept falling
     const until = Date.now() + R.assetCooldownHours * 3600_000;
     if (pos.venue === 'hl') state.copyCooldown.set(pos.coin, until);
