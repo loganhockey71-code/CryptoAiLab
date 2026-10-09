@@ -35,6 +35,13 @@ app.get('/api/stream', (req, res) => {
   req.on('close', () => clearInterval(t));
 });
 
+// Alerts page "load more": alerts strictly before ?beforeSeq (an alert's `seq`), newest first.
+app.get('/api/alerts', (req, res) => {
+  if (!engine.isReady()) return res.status(503).json({ error: 'starting' });
+  const beforeSeq = req.query.beforeSeq != null ? Number(req.query.beforeSeq) : Infinity;
+  res.json({ alerts: engine.alertsPage(beforeSeq, 100) });
+});
+
 let tradeCache = { at: 0, rows: [] };
 async function recentTrades() {
   if (Date.now() - tradeCache.at > 5000) tradeCache = { at: Date.now(), rows: (await db.recentTrades(200)) ?? [] };
