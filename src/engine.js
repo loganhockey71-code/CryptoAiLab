@@ -5,7 +5,8 @@ import { db } from './db.js';
 import { feed, fetchCandles, loadProducts, loadGateMarkets, fetchBook } from './exchange.js';
 import { hl } from './hyperliquid.js';
 import { onchainPx } from './onchainprices.js';
-import { refreshUniverse, restoreCooldowns, universe, cgTrending, radar as radarState, watchOnlyMovers, refreshHot, refreshTail, cgStats } from './universe.js';
+import { refreshUniverse, restoreCooldowns, universe, cgTrending, cgCategories, categoriesAgeMs, radar as radarState, watchOnlyMovers, refreshHot, refreshTail, cgStats } from './universe.js';
+import * as dashboard from './dashboard.js';
 import * as radarLib from './radar.js';
 import { snapshot, aggregate, rvol as calcRvol, atr, ema, rsi, candlePattern } from './indicators.js';
 import * as src from './sources.js';
@@ -45,6 +46,10 @@ export const state = {
   freezeKeys: new Set(),       // breaker events that have already caused a freeze (so one event can never re-freeze)
   copyCooldown: new Map(),     // coin -> until (2h lockout after a copied position hits its stop)
   rescore: new Set(),          // trader addresses whose win rate must be re-evaluated now (3rd straight loss, or manual release)
+  categories: new Map(),       // CoinGecko category slug -> Set(coingecko_id), refreshed every few hours
+  alerts: [],                  // Alerts page: news + AI-generated signal/trade events, newest first, capped at 300
+  prevLiveSymbols: new Set(),  // last scan's live BUY/SHORT symbols, so a NEW one can be alerted once
+  lastActiveRuleCount: null,   // last scan's count of active learned rules, so a newly-active one can be alerted once
   brain: { at: null, regime: null, market: null, env: null, events: [], opportunities: [], avoid: [], watch: [], counts: {}, analysed: 0, byClass: {} },   // the Brain's latest read of the whole market
   scan: { running: false, startedAt: null, finishedAt: null, count: 0, lastError: null, progress: '' },
   sources: {},                 // name -> { tier, ok, fetchedAt, error }
