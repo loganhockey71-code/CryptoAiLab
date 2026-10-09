@@ -397,7 +397,34 @@ function renderLeaderboard(s) {
     <td class="muted">${track(r.history)}</td></tr>`).join('')
     : '<tr><td colspan="9" class="empty">No live ideas right now: the AI is waiting instead of forcing a trade.</td></tr>';
 }
-function renderCategories() {}
+let categoryOn = null; // null = all; otherwise one slug ('major', 'meme-token', ..., 'uncategorized')
+function renderCategories(s) {
+  const cats = s.categories || { list: [], ageMs: null };
+  const all = [{ slug: 'major', label: 'Major' }, ...cats.list, { slug: 'uncategorized', label: 'Uncategorized' }];
+  $('#categories-note').textContent = cats.ageMs == null ? 'category data not fetched yet' : `category data refreshed ${ago(Date.now() - cats.ageMs)}`;
+  $('#categories-pills').innerHTML = [{ slug: null, label: 'All' }, ...all].map((c) => `<button type="button" class="tog ${categoryOn === c.slug ? 'on' : ''}" data-slug="${c.slug ?? ''}">${esc(c.label)}</button>`).join('');
+  const rows = (categoryOn ? s.rows.filter((r) => (r.category || []).includes(categoryOn)) : s.rows).filter((r) => r.tradable);
+  $('#categories-table tbody').innerHTML = rows.length ? rows.map((r) => `<tr data-sym="${esc(r.symbol)}">
+    <td class="muted">${r.rank}</td><td><b>${esc(r.symbol)}</b> <span class="muted">${esc(r.name)}</span></td>
+    <td class="r">${price(r.price)}</td><td class="r">${chgCell(r)}</td>
+    <td class="cat-tags">${(r.category || []).map((c) => `<span class="pill">${esc(c.replace(/-/g, ' '))}</span>`).join('')}</td>
+    <td class="r">${r.score == null ? '—' : r.score}</td></tr>`).join('')
+    : '<tr><td colspan="6" class="empty">No tradable coin in this category.</td></tr>';
+}
+$('#categories-pills').addEventListener('click', (e) => {
+  const b = e.target.closest('.tog');
+  if (!b) return;
+  categoryOn = b.dataset.slug || null;
+  if (latest) renderCategories(latest);
+});
+$('#categories-table tbody').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-sym]');
+  if (!tr) return;
+  selected = tr.dataset.sym;
+  $('#chart-symbol').textContent = selected;
+  refreshChart();
+  location.hash = '#tokens';
+});
 
 function renderView(name, s) {
   if (name === 'tokens') renderTable(s);
