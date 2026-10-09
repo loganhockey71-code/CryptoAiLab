@@ -758,6 +758,7 @@ function historyFromDb(t) {
     entry: Number(t.entry_price), exit: Number(t.exit_price), notional: Number(t.final_pnl_pct) ? Math.abs(Number(t.final_pnl) / Number(t.final_pnl_pct)) : Number(t.notional), pnl: Number(t.final_pnl), pnlPct: Number(t.final_pnl_pct),
     reason: t.exit_reason, openedAt: new Date(t.entry_time).getTime(), closedAt: new Date(t.exit_time).getTime(),
     origin: String(t.source ?? '').startsWith('copy_') ? 'mimic' : 'own', trigger: t.entry_trigger ?? null, triggerReasons: t.prediction?.trigger?.reasons ?? [], mode: t.prediction?.mode ?? 'normal',
+    setup: t.prediction?.setup ?? null,
   };
 }
 
@@ -767,6 +768,7 @@ function recordHistory(pos, trade, notional) {
     entry: pos.entry, exit: trade.exit_price, notional, pnl: trade.final_pnl, pnlPct: trade.final_pnl_pct, reason: trade.exit_reason,
     openedAt: pos.openedAt, closedAt: Date.now(),
     origin: pos.copy ? 'mimic' : 'own', trigger: pos.trigger?.kind ?? null, triggerReasons: pos.trigger?.reasons ?? [], mode: pos.mode ?? 'normal',
+    setup: pos.ctx?.brain?.setup?.name ?? null,
   });
   if (state.recentClosed.length > 200) state.recentClosed.length = 200;
 }
