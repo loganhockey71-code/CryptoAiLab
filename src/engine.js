@@ -1318,6 +1318,9 @@ export function snapshotForUi() {
       tradable: coin.tradable, excluded: coin.excludedReason, health: cs?.health?.ok ? 'ok' : cs?.health?.reason ?? 'pending',
       cooldownUntil: coin.cooldownUntil && coin.cooldownUntil > now ? coin.cooldownUntil : null,
       stale: coin.product ? feed.tickAgeMs(coin.product) > R.staleMs : null,
+      trending: state.trending.has(coin.id),
+      category: dashboard.categoriesFor(coin, state.categories, config.categories.list, config.categories.majorRank),
+      hot: dashboard.hotScore({ rvol: cs?.rvol ?? null, chg1h: coin.chg1h ?? null, chg24h: coin.chg24h ?? null, trending: state.trending.has(coin.id), sentiment: cs?.sentiment?.score ?? null, sentimentCount: cs?.sentiment?.count ?? 0 }),
       ...(cs ? rowActivity(cs) : {}),
     };
   });
@@ -1348,6 +1351,14 @@ export function snapshotForUi() {
     pending: [...state.pending.values()].map((x) => ({ symbol: x.symbol, refPrice: x.refPrice, createdAt: x.createdAt, score: x.decision?.score ?? null })),
     brain: brainSnapshot(),
     limits: { minConfluence: R.minConfluence, minRR: R.minRR, maxPositions: R.maxOpenPositions },
+    categories: { list: config.categories.list, ageMs: categoriesAgeMs() },
+    alerts: state.alerts.slice(0, 200),
+    leaderboard: dashboard.buildLeaderboard(state.brain.opportunities ?? [], state.recentClosed, {}),
   };
+}
+
+/** Alerts older than `beforeTs` (default: now), newest first, for the Alerts page's "load more". */
+export function alertsPage(beforeTs = Date.now(), limit = 100) {
+  return state.alerts.filter((a) => a.at < beforeTs).slice(0, limit);
 }
 export const __test = { chandelierStop, onTick, onMomentumCheck };
