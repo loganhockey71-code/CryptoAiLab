@@ -117,27 +117,32 @@ export async function cgTrending() {
 
 /** CoinGecko's markets list filtered by category, one call per configured slug (config.categories.list), cached on config.categories.everyMs.
  *  Returns Map<slug, Set<coingecko_id>>. A slug whose fetch fails keeps its last good set (stale beats empty) and the cache is retried sooner. */
-let categoryCache = { at: 0, bySlug: new Map() };
+const categoryCache = { bySlug: new Map(), atBySlug: new Map() };     // atBySlug: slug -> ms epoch of its last SUCCESSFUL fetch (undefined before the first success)
+let categoryNextAt = 0;        // when the whole cycle is next allowed to run again
 export async function cgCategories() {
   const Zc = config.categories;
-  if (categoryCache.at && Date.now() - categoryCache.at < Zc.everyMs) return categoryCache.bySlug;
-  const bySlug = new Map();
+  if (Date.now() < categoryNextAt) return categoryCache.bySlug;
   let okAny = false;
   for (const { slug } of Zc.list) {
     try {
       const rows = await cgFetch(`/coins/markets?vs_currency=usd&category=${slug}&per_page=250`, 'lo');
-      bySlug.set(slug, new Set(rows.map((r) => r.id)));
+      categoryCache.bySlug.set(slug, new Set(rows.map((r) => r.id)));
+      categoryCache.atBySlug.set(slug, Date.now());
       okAny = true;
     } catch (e) {
       warn(`CoinGecko category '${slug}' unavailable:`, e.message);
-      bySlug.set(slug, categoryCache.bySlug.get(slug) ?? new Set());
+      if (!categoryCache.bySlug.has(slug)) categoryCache.bySlug.set(slug, new Set());    // first-ever fetch failed: at least don't leave the slug undefined
     }
   }
-  categoryCache = okAny ? { at: Date.now(), bySlug } : { at: Date.now() - Zc.everyMs + 5 * 60_000, bySlug };
+  categoryNextAt = Date.now() + (okAny ? Zc.everyMs : 5 * 60_000);
   return categoryCache.bySlug;
 }
-/** Age of the current category cache in ms, or null before the first fetch (for the UI's staleness label). */
-export function categoriesAgeMs() { return categoryCache.at ? Date.now() - categoryCache.at : null; }
+/** Age of the STALEST configured slug in ms (the worst-case, honest staleness), or null before any slug has ever succeeded. */
+export function categoriesAgeMs() {
+  if (!categoryCache.atBySlug.size) return null;
+  const oldest = Math.min(...categoryCache.atBySlug.values());
+  return Date.now() - oldest;
+}
 
 export const universe = { coins: new Map(), updatedAt: 0, cmcAvailable: false, lastError: null, coinbaseMarkets: 0 };
 
