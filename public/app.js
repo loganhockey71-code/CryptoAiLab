@@ -414,6 +414,8 @@ $('#hot-table tbody').addEventListener('click', (e) => {
   const tr = e.target.closest('tr[data-sym]');
   if (!tr) return;
   selected = tr.dataset.sym;
+  $('#chart-symbol').textContent = selected;
+  refreshChart();
   location.hash = '#tokens';
 });
 $('#filter').addEventListener('input', () => latest && renderTable(latest));
