@@ -93,3 +93,32 @@ table.mini td, table.mini th { padding: 3px 8px; font-size: 12px; } .rep h3 { ma
 .whyblock { margin-top: 6px; } .wy { display: grid; grid-template-columns: 120px 1fr; gap: 8px; font-size: 12px; padding: 2px 0; border-top: 1px dashed var(--line); } .wy .k { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: .05em; padding-top: 2px; }
 .funnel { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 11px; } .funnel span { display: flex; flex-direction: column; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; color: var(--muted); } .funnel span b { color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; } .funnel em { color: var(--muted); font-style: normal; }
 .pill.shortc { color: var(--red); border-color: rgba(239,83,80,.6); background: rgba(239,83,80,.12); font-weight: 700; }
+
+/* ---- nav shell */
+.nav { display: flex; gap: 4px; flex-wrap: wrap; }
+.nav a { color: var(--muted); text-decoration: none; font-size: 12px; padding: 5px 10px; border-radius: 6px; border: 1px solid transparent; }
+.nav a:hover { color: var(--text); }
+.nav a.active { color: var(--text); border-color: var(--line); background: var(--panel2); }
+input.search { background: var(--panel2); border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 5px 9px; width: 220px; }
+.view.hidden { display: none !important; }
+.grid-1 { display: grid; gap: 12px; padding: 12px 16px 24px; }
+
+/* ---- Tokens: category/trending tags */
+.pill.trending { color: var(--amber); border-color: rgba(245,166,35,.5); }
+.cat-tags { display: inline-flex; gap: 3px; flex-wrap: wrap; }
+.cat-tags .pill { text-transform: capitalize; }
+
+/* ---- Hot page */
+#hot-table .heat { display: inline-block; min-width: 80px; height: 6px; border-radius: 3px; background: var(--line); position: relative; vertical-align: middle; }
+#hot-table .heat b { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--amber); }
+.sig-badges { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+
+/* ---- Alerts page */
+.alert-row { display: flex; gap: 10px; align-items: baseline; padding: 7px 12px; border-top: 1px solid var(--line); font-size: 12px; }
+.alert-row:first-child { border-top: 0; }
+.alert-row .pill.type-news { color: var(--blue); border-color: rgba(91,157,255,.5); }
+.alert-row .pill.type-signal { color: var(--amber); border-color: rgba(245,166,35,.5); }
+.alert-row .pill.type-trade { color: var(--green); border-color: rgba(38,166,154,.5); }
+
+/* ---- Categories page */
+#categories-pills .tog.on { color: var(--blue); border-color: var(--blue); background: rgba(91,157,255,.12); }
