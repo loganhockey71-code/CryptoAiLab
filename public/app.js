@@ -370,11 +370,11 @@ function renderHot(s) {
 }
 let alertType = 'all';
 function renderAlerts(s) {
-  const newsAlerts = (s.newsFeed.items || []).map((i) => ({ at: i.publishedAt, type: 'news', symbol: '*', text: `${esc(i.source)}: ${esc(i.title)}` }));
+  const newsAlerts = (s.newsFeed.items || []).map((i) => ({ at: i.publishedAt, type: 'news', symbol: '*', text: `${i.source}: ${i.title}` }));
   const all = [...s.alerts, ...newsAlerts].sort((a, b) => b.at - a.at).slice(0, 200);
   const rows = alertType === 'all' ? all : all.filter((a) => a.type === alertType);
   $('#alerts-note').textContent = `${rows.length} of ${all.length} alerts (news items read every scan, plus HOT/signal/trade events)`;
-  $('#alerts-list').innerHTML = rows.length ? rows.map((a) => `<div class="alert-row"><span class="muted">${ago(a.at)}</span><span class="pill type-${esc(a.type)}">${esc(a.type)}</span>${a.symbol && a.symbol !== '*' ? `<b>${esc(a.symbol)}</b>` : ''}<span>${a.text}</span></div>`).join('')
+  $('#alerts-list').innerHTML = rows.length ? rows.map((a) => `<div class="alert-row"><span class="muted">${ago(a.at)}</span><span class="pill type-${esc(a.type)}">${esc(a.type)}</span>${a.symbol && a.symbol !== '*' ? `<b>${esc(a.symbol)}</b>` : ''}<span>${esc(a.text)}</span></div>`).join('')
     : '<div class="empty">No alerts yet.</div>';
 }
 $('#alert-filter').addEventListener('click', (e) => {
