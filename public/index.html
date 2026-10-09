@@ -9,11 +9,88 @@
 <body>
 <header class="top">
   <div class="brand">Crypto AI Lab <span class="badge paper">PAPER ONLY</span></div>
+  <input id="search" type="search" placeholder="Search tokens…" autocomplete="off" class="search">
+  <nav id="nav" class="nav">
+    <a href="#tokens" data-view="tokens">Tokens</a>
+    <a href="#hot" data-view="hot">Hot</a>
+    <a href="#alerts" data-view="alerts">Alerts</a>
+    <a href="#leaderboard" data-view="leaderboard">AI Leaderboard</a>
+    <a href="#categories" data-view="categories">Categories</a>
+    <a href="#portfolio" data-view="portfolio">Portfolio</a>
+  </nav>
   <div class="stats" id="stats"></div>
 </header>
 <div id="banner" class="banner hidden"></div>
 
-<main class="grid">
+<main id="view-tokens" class="grid view">
+  <section class="panel table-panel">
+    <div class="panel-head">
+      <h2>All tradable coins <small id="universe-note"></small></h2>
+      <div class="toggles" id="up-toggles" title="Show only coins that are rising on every selected timeframe">
+        <button type="button" class="tog" data-tf="m1">1M ▲</button>
+        <button type="button" class="tog" data-tf="h1">1H ▲</button>
+        <button type="button" class="tog" data-tf="h24">24H ▲</button>
+      </div>
+      <div class="toggles" id="category-filter" title="Filter by category"></div>
+      <input id="filter" type="search" placeholder="Filter coin…" autocomplete="off">
+    </div>
+    <div class="scroll table-scroll">
+      <table id="coins">
+        <thead><tr>
+          <th>#</th><th>Coin</th><th class="r">Price</th><th class="r">1h / 24h</th><th>1m candle</th><th>Signal</th><th class="r">Score</th>
+          <th>Class</th><th class="r">RVOL</th><th class="r">Funding</th><th class="r">News</th><th>Data</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel chart-panel">
+    <div class="panel-head"><h2>Chart · <span id="chart-symbol">BTC</span> <small>1m</small></h2><span class="muted" id="chart-note"></span></div>
+    <div id="chart"></div>
+  </section>
+</main>
+
+<main id="view-hot" class="grid-1 view hidden">
+  <section class="panel">
+    <div class="panel-head"><h2>Hot <small id="hot-note">price momentum, volume spikes and trending/sentiment where available</small></h2></div>
+    <div class="scroll table-scroll"><table id="hot-table"><thead><tr><th>#</th><th>Coin</th><th class="r">Price</th><th class="r">1h / 24h</th><th class="r">RVOL</th><th>Signals</th><th class="r">Heat</th></tr></thead><tbody></tbody></table></div>
+  </section>
+</main>
+
+<main id="view-alerts" class="grid-1 view hidden">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Alerts <small id="alerts-note">news + AI-generated signal and trade events</small></h2>
+      <div class="toggles" id="alert-filter">
+        <button type="button" class="tog on" data-type="all">All</button>
+        <button type="button" class="tog" data-type="news">News</button>
+        <button type="button" class="tog" data-type="signal">Signal</button>
+        <button type="button" class="tog" data-type="trade">Trade</button>
+      </div>
+    </div>
+    <div class="scroll" id="alerts-list" style="max-height:720px"></div>
+  </section>
+</main>
+
+<main id="view-leaderboard" class="grid-1 view hidden">
+  <section class="panel">
+    <div class="panel-head"><h2>AI Leaderboard <small id="leaderboard-note">today's top live ideas, with each setup's measured track record</small></h2></div>
+    <div class="scroll table-scroll"><table id="leaderboard-table"><thead><tr><th>Coin</th><th>Action</th><th>Class</th><th>Setup</th><th class="r">Score</th><th class="r">P(target)</th><th class="r">EV</th><th class="r">R:R</th><th>Track record</th></tr></thead><tbody></tbody></table></div>
+  </section>
+</main>
+
+<main id="view-categories" class="grid-1 view hidden">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Categories <small id="categories-note"></small></h2>
+      <div class="toggles" id="categories-pills"></div>
+    </div>
+    <div class="scroll table-scroll"><table id="categories-table"><thead><tr><th>#</th><th>Coin</th><th class="r">Price</th><th class="r">1h / 24h</th><th>Category</th><th class="r">Score</th></tr></thead><tbody></tbody></table></div>
+  </section>
+</main>
+
+<main id="view-portfolio" class="grid view hidden">
   <section class="panel regime-panel">
     <div class="panel-head"><h2>Market Regime <small id="regime-note">BTC / ETH structure, breadth, macro and news</small></h2></div>
     <div id="regime"></div>
@@ -37,32 +114,6 @@
   <section class="panel report-panel">
     <div class="panel-head"><h2>Learning Report <small>outcomes, validated rules, vetoes, missed moves</small></h2></div>
     <div class="scroll" id="learning"></div>
-  </section>
-
-  <section class="panel table-panel">
-    <div class="panel-head">
-      <h2>All tradable coins <small id="universe-note"></small></h2>
-      <div class="toggles" id="up-toggles" title="Show only coins that are rising on every selected timeframe">
-        <button type="button" class="tog" data-tf="m1">1M ▲</button>
-        <button type="button" class="tog" data-tf="h1">1H ▲</button>
-        <button type="button" class="tog" data-tf="h24">24H ▲</button>
-      </div>
-      <input id="filter" type="search" placeholder="Filter coin…" autocomplete="off">
-    </div>
-    <div class="scroll table-scroll">
-      <table id="coins">
-        <thead><tr>
-          <th>#</th><th>Coin</th><th class="r">Price</th><th class="r">1h / 24h</th><th>1m candle</th><th>Signal</th><th class="r">Score</th>
-          <th>Class</th><th class="r">RVOL</th><th class="r">Funding</th><th class="r">News</th><th>Data</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </section>
-
-  <section class="panel chart-panel">
-    <div class="panel-head"><h2>Chart · <span id="chart-symbol">BTC</span> <small>1m</small></h2><span class="muted" id="chart-note"></span></div>
-    <div id="chart"></div>
   </section>
 
   <section class="panel pos-panel">
