@@ -384,7 +384,19 @@ $('#alert-filter').addEventListener('click', (e) => {
   alertType = b.dataset.type;
   if (latest) renderAlerts(latest);
 });
-function renderLeaderboard() {}
+function renderLeaderboard(s) {
+  const rows = s.leaderboard || [];
+  $('#leaderboard-note').textContent = rows.length ? `${rows.length} live ideas this scan, ranked by composite score` : 'No coin currently has a BUY/SHORT/WATCH-worthy setup';
+  const track = (h) => !h ? '<span class="muted">no closed trades yet for this setup</span>' : h.thin ? `<span class="muted">${h.n} closed (thin: needs more data)</span>` : `${h.n} closed · win rate ${(h.winRate * 100).toFixed(0)}% · avg ${h.avgPnlPct >= 0 ? '+' : ''}${(h.avgPnlPct * 100).toFixed(2)}%`;
+  $('#leaderboard-table tbody').innerHTML = rows.length ? rows.map((r) => `<tr data-sym="${esc(r.symbol)}">
+    <td><b>${esc(r.symbol)}</b> <span class="muted">${esc(r.name)}</span></td>
+    <td><span class="pill ${r.action === 'BUY' ? 'good' : r.action === 'SHORT' ? 'bad' : 'amber'}">${esc(r.verdict || r.action)}</span></td>
+    <td><span class="pill ${r.cls === 'HOT' ? 'hotc' : r.cls === 'WATCH' ? 'amber' : ''}">${esc(r.cls)}</span></td>
+    <td>${r.setup ? esc(r.setup) : '<span class="muted">—</span>'}</td>
+    <td class="r">${r.score}</td><td class="r">${(r.pUp * 100).toFixed(0)}%</td><td class="r">${r.ev == null ? '—' : r.ev + 'R'}</td><td class="r">${r.rr ?? '—'}</td>
+    <td class="muted">${track(r.history)}</td></tr>`).join('')
+    : '<tr><td colspan="9" class="empty">No live ideas right now: the AI is waiting instead of forcing a trade.</td></tr>';
+}
 function renderCategories() {}
 
 function renderView(name, s) {
@@ -426,6 +438,14 @@ $('#coins tbody').addEventListener('click', (e) => {
   refreshChart();
 });
 $('#hot-table tbody').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-sym]');
+  if (!tr) return;
+  selected = tr.dataset.sym;
+  $('#chart-symbol').textContent = selected;
+  refreshChart();
+  location.hash = '#tokens';
+});
+$('#leaderboard-table tbody').addEventListener('click', (e) => {
   const tr = e.target.closest('tr[data-sym]');
   if (!tr) return;
   selected = tr.dataset.sym;
