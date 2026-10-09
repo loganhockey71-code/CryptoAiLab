@@ -356,7 +356,18 @@ $('#avoid').addEventListener('click', (e) => { const c = e.target.closest('[data
 // TEMPORARY stubs — replaced by Task 13 (renderHot), Task 14 (renderAlerts),
 // Task 15 (renderLeaderboard), Task 16 (renderCategories). Do not add duplicate
 // declarations in those tasks; replace the stub body in place.
-function renderHot() {}
+function renderHot(s) {
+  const tbody = $('#hot-table tbody');
+  const rows = s.rows.filter((r) => r.tradable && r.hot && r.hot.available.length).slice().sort((a, b) => b.hot.total - a.hot.total).slice(0, 60);
+  $('#hot-note').textContent = `${rows.length} coins with at least one live signal (volume, momentum, trending or sentiment), ranked by their combined heat`;
+  const partLabel = { volume: 'RVOL', momentum1h: '1h▲', momentum24h: '24h▲', trending: 'trending', sentiment: 'sentiment' };
+  tbody.innerHTML = rows.length ? rows.map((r, i) => `<tr data-sym="${esc(r.symbol)}">
+    <td class="muted">${i + 1}</td><td><b>${esc(r.symbol)}</b> <span class="muted">${esc(r.name)}</span></td>
+    <td class="r">${price(r.price)}</td><td class="r">${chgCell(r)}</td><td class="r ${r.rvol > 1.5 ? 'up' : ''}">${r.rvol == null ? '—' : r.rvol.toFixed(2)}</td>
+    <td><span class="sig-badges">${Object.keys(r.hot.parts).map((k) => `<span class="pill good">${esc(partLabel[k] || k)}</span>`).join('')}</span></td>
+    <td class="r"><span class="heat" title="${esc(Object.entries(r.hot.parts).map(([k, v]) => `${partLabel[k] || k} ${v}`).join(', '))}"><b style="width:${Math.min(100, r.hot.total * 12)}%"></b></span> ${r.hot.total}</td></tr>`).join('')
+    : '<tr><td colspan="7" class="empty">No coin currently has a live volume, momentum, trending or sentiment signal.</td></tr>';
+}
 function renderAlerts() {}
 function renderLeaderboard() {}
 function renderCategories() {}
@@ -398,6 +409,12 @@ $('#coins tbody').addEventListener('click', (e) => {
   document.querySelectorAll('#coins tbody tr.sel').forEach((x) => x.classList.remove('sel'));
   tr.classList.add('sel');
   refreshChart();
+});
+$('#hot-table tbody').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-sym]');
+  if (!tr) return;
+  selected = tr.dataset.sym;
+  location.hash = '#tokens';
 });
 $('#filter').addEventListener('input', () => latest && renderTable(latest));
 $('#up-toggles').addEventListener('click', (e) => {
