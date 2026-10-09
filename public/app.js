@@ -11,6 +11,17 @@ const hhmm = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute
 let selected = 'BTC';
 let latest = null;
 
+/* ------------------------------------------------------------------ router */
+const VIEWS = ['tokens', 'hot', 'alerts', 'leaderboard', 'categories', 'portfolio'];
+function showView(name) {
+  if (!VIEWS.includes(name)) name = 'tokens';
+  for (const v of VIEWS) $(`#view-${v}`).classList.toggle('hidden', v !== name);
+  document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === name));
+  if (latest) renderView(name, latest);
+}
+function currentView() { return (location.hash || '#tokens').slice(1); }
+window.addEventListener('hashchange', () => showView(currentView()));
+
 /* ------------------------------------------------------------------ chart */
 const chart = LightweightCharts.createChart($('#chart'), {
   layout: { background: { color: '#121722' }, textColor: '#9aa7bf' },
@@ -342,9 +353,26 @@ function renderLearning(L, rules, positions) {
 $('#opps').addEventListener('click', (e) => { const c = e.target.closest('[data-sym]'); if (c) { selected = c.dataset.sym; $('#chart-symbol').textContent = selected; refreshChart(); } });
 $('#avoid').addEventListener('click', (e) => { const c = e.target.closest('[data-sym]'); if (c) { selected = c.dataset.sym; $('#chart-symbol').textContent = selected; refreshChart(); } });
 
+// TEMPORARY stubs — replaced by Task 13 (renderHot), Task 14 (renderAlerts),
+// Task 15 (renderLeaderboard), Task 16 (renderCategories). Do not add duplicate
+// declarations in those tasks; replace the stub body in place.
+function renderHot() {}
+function renderAlerts() {}
+function renderLeaderboard() {}
+function renderCategories() {}
+
+function renderView(name, s) {
+  if (name === 'tokens') renderTable(s);
+  else if (name === 'hot') renderHot(s);
+  else if (name === 'alerts') renderAlerts(s);
+  else if (name === 'leaderboard') renderLeaderboard(s);
+  else if (name === 'categories') renderCategories(s);
+  else if (name === 'portfolio') { renderBrain(s.brain); renderPositions(s); renderHistory(s.history); renderNews(s.newsFeed); renderRadar(s.radar); renderCopy(s.copy); renderDecisions(s); renderReflections(s); }
+}
 function render(s) {
   latest = s;
-  renderStats(s); renderBrain(s.brain); renderTable(s); renderPositions(s); renderHistory(s.history); renderNews(s.newsFeed); renderRadar(s.radar); renderCopy(s.copy); renderDecisions(s); renderReflections(s);
+  renderStats(s);
+  renderView(currentView(), s);
 }
 
 $('#copy').addEventListener('click', async (e) => {
@@ -388,4 +416,12 @@ function connect() {
   es.onerror = () => { es.close(); setTimeout(connect, 2000); };
 }
 connect();
+
+$('#search').addEventListener('input', () => {
+  const q = $('#search').value.trim();
+  if (currentView() !== 'tokens') location.hash = '#tokens';
+  $('#filter').value = q;
+  if (latest) renderTable(latest);
+});
+showView(currentView());
 refreshChart();
