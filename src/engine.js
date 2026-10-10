@@ -1320,8 +1320,8 @@ export function snapshotForUi() {
       stale: coin.product ? feed.tickAgeMs(coin.product) > R.staleMs : null,
       trending: state.trending.has(coin.id),
       category: dashboard.categoriesFor(coin, state.categories, config.categories.list, config.categories.majorRank),
-      hot: dashboard.hotScore({ rvol: cs?.rvol ?? null, chg1h: coin.chg1h ?? null, chg24h: coin.chg24h ?? null, trending: state.trending.has(coin.id), sentiment: cs?.sentiment?.score ?? null, sentimentCount: cs?.sentiment?.count ?? 0 }),
       ...(cs ? rowActivity(cs) : {}),
+      hotScore: dashboard.hotScore({ rvol: cs?.rvol ?? null, chg1h: coin.chg1h ?? null, chg24h: coin.chg24h ?? null, trending: state.trending.has(coin.id), sentiment: cs?.sentiment?.score ?? null, sentimentCount: cs?.sentiment?.count ?? 0 }),
     };
   });
   const positions = [...state.positions.values()].map((x) => {
